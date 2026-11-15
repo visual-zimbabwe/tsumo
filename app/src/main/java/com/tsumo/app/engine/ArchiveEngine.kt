@@ -1,11 +1,10 @@
 package com.tsumo.app.engine
 
 import com.tsumo.app.data.BookItem
-import com.tsumo.app.data.DoctorCheck
 import com.tsumo.app.data.DownloadProgress
 import com.tsumo.app.data.EngineStatus
 import com.tsumo.app.data.HistoryItem
-import com.tsumo.app.data.ProfileLimits
+import com.tsumo.app.data.SourceCheck
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
@@ -23,7 +22,7 @@ data class HistoryResponse(
     val totalPages: Int,
 )
 
-object ZlibEngine {
+object ArchiveEngine {
     init {
         System.loadLibrary("tsumo")
     }
@@ -52,69 +51,32 @@ object ZlibEngine {
         parseStatus(rawCall("status"))
     }
 
-    suspend fun login(email: String, password: String, domain: String, useEapi: Boolean): EngineStatus =
+    suspend fun setSources(enableGutenberg: Boolean, enableInternetArchive: Boolean): EngineStatus =
         withContext(Dispatchers.IO) {
             val payload = JSONObject()
-                .put("email", email)
-                .put("password", password)
-                .put("domain", domain)
-                .put("useEapi", useEapi)
-            parseStatus(rawCall("login", payload))
+                .put("enableGutenberg", enableGutenberg)
+                .put("enableInternetArchive", enableInternetArchive)
+            parseStatus(rawCall("setSources", payload))
         }
 
-    suspend fun autoLogin(): EngineStatus = withContext(Dispatchers.IO) {
-        parseStatus(rawCall("autoLogin"))
-    }
-
-    suspend fun importCookies(cookiesText: String, domain: String, useEapi: Boolean): EngineStatus =
-        withContext(Dispatchers.IO) {
-            val payload = JSONObject()
-                .put("cookiesText", cookiesText)
-                .put("domain", domain)
-                .put("useEapi", useEapi)
-            parseStatus(rawCall("importCookies", payload))
-        }
-
-    suspend fun logout(): EngineStatus = withContext(Dispatchers.IO) {
-        parseStatus(rawCall("logout"))
-    }
-
-    suspend fun setDomain(domain: String, mode: String): EngineStatus = withContext(Dispatchers.IO) {
-        val payload = JSONObject()
-            .put("domain", domain)
-            .put("mode", mode)
-        parseStatus(rawCall("setDomain", payload))
-    }
-
-    suspend fun doctor(): List<DoctorCheck> = withContext(Dispatchers.IO) {
+    suspend fun doctor(): List<SourceCheck> = withContext(Dispatchers.IO) {
         val json = rawCall("doctor")
         val arr = json.optJSONArray("checks") ?: JSONArray()
         buildList {
             for (i in 0 until arr.length()) {
                 val obj = arr.getJSONObject(i)
                 add(
-                    DoctorCheck(
+                    SourceCheck(
                         domain = obj.optString("domain"),
+                        name = obj.optString("name"),
                         status = obj.optString("status"),
                         httpStatus = obj.optInt("http_status", 0),
-                        finalUrl = obj.optString("final_url"),
                         detail = obj.optString("detail"),
-                        eapiStatus = obj.optString("eapi_status"),
-                        eapiOk = obj.optBoolean("eapi_ok", false),
+                        ok = obj.optBoolean("ok", false),
                     )
                 )
             }
         }
-    }
-
-    suspend fun profile(): ProfileLimits = withContext(Dispatchers.IO) {
-        val json = rawCall("profile")
-        ProfileLimits(
-            dailyAmount = json.optInt("daily_amount", 0),
-            dailyAllowed = json.optInt("daily_allowed", 0),
-            dailyRemaining = json.optInt("daily_remaining", 0),
-            dailyReset = json.optString("daily_reset"),
-        )
     }
 
     suspend fun search(
@@ -166,12 +128,16 @@ object ZlibEngine {
         bookId: String,
         directUrl: String,
         destDir: String,
+        title: String = "",
+        extension: String = "",
     ) = withContext(Dispatchers.IO) {
         val payload = JSONObject()
             .put("downloadId", downloadId)
             .put("bookId", bookId)
             .put("directUrl", directUrl)
             .put("destDir", destDir)
+            .put("title", title)
+            .put("extension", extension)
         rawCall("startDownload", payload)
         Unit
     }
@@ -205,13 +171,13 @@ object ZlibEngine {
                     HistoryItem(
                         id = obj.optString("id"),
                         commandId = obj.optString("command_id"),
-                        hash = obj.optString("hash"),
                         name = obj.optString("name"),
                         url = obj.optString("url"),
                         downloadUrl = obj.optString("download_url"),
                         extension = obj.optString("extension"),
                         size = obj.optString("size"),
                         date = obj.optString("date"),
+                        source = obj.optString("source"),
                     )
                 )
             }
@@ -245,11 +211,8 @@ object ZlibEngine {
     }
 
     private fun parseStatus(json: JSONObject): EngineStatus = EngineStatus(
-        loggedIn = json.optBoolean("loggedIn", false),
-        loggedOutManually = json.optBoolean("loggedOutManually", false),
-        domain = json.optString("domain", "https://z-lib.gd"),
-        mode = json.optString("mode", "eapi"),
-        lastEmail = json.optString("lastEmail"),
+        enableGutenberg = json.optBoolean("enableGutenberg", true),
+        enableInternetArchive = json.optBoolean("enableInternetArchive", true),
         kindleReady = json.optBoolean("kindleReady", false),
         kindleTo = json.optString("kindleTo"),
         kindleFrom = json.optString("kindleFrom"),
@@ -288,6 +251,7 @@ object ZlibEngine {
             categories = obj.optString("categories"),
             edition = obj.optString("edition"),
             downloadUrl = obj.optString("download_url"),
+            source = obj.optString("source"),
         )
     }
 }

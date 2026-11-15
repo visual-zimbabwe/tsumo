@@ -21,46 +21,38 @@ static void tsumo_log(int prio, const char* msg) {
 import "C"
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"time"
 	"unsafe"
-
-	"github.com/heartleo/zlib"
 )
 
-const (
-	eapiProbePath      = "/eapi/info/domains"
-	defaultLoginDomain = "https://z-lib.gd"
-)
-
-// Injected at build time via -ldflags when engine/.env is present (gitignored).
-var (
-	defaultLoginEmail    = ""
-	defaultLoginPassword = ""
-)
-
-type sessionData struct {
-	Cookies map[string]string `json:"cookies"`
-	Domain  string            `json:"domain"`
-	Mode    string            `json:"mode,omitempty"`
-}
-
-type appConfigData struct {
-	LastLoginEmail string `json:"last_login_email,omitempty"`
+type sourceConfig struct {
+	EnableGutenberg       bool `json:"enable_gutenberg"`
+	EnableInternetArchive bool `json:"enable_internet_archive"`
 }
 
 type kindleSecretData struct {
-	zlib.KindleConfig
+	KindleConfig
 	SMTPPassword string `json:"smtp_password,omitempty"`
+}
+
+type HistoryEntry struct {
+	ID          string `json:"id"`
+	CommandID   string `json:"command_id"`
+	Name        string `json:"name"`
+	URL         string `json:"url"`
+	DownloadURL string `json:"download_url"`
+	Extension   string `json:"extension"`
+	Size        string `json:"size"`
+	Date        string `json:"date"`
+	Source      string `json:"source,omitempty"`
 }
 
 type downloadState struct {
@@ -75,12 +67,11 @@ type downloadState struct {
 }
 
 var (
-	mu         sync.Mutex
-	dataDir    string
-	client     *zlib.Client
-	session    sessionData
-	appCfg     appConfigData
-	kindleCfg  kindleSecretData
+	mu           sync.Mutex
+	dataDir      string
+	srcCfg       = sourceConfig{EnableGutenberg: true, EnableInternetArchive: true}
+	kindleCfg    kindleSecretData
+	historyItems []HistoryEntry
 
 	dlMu      sync.Mutex
 	downloads = make(map[string]*downloadState)
@@ -138,20 +129,10 @@ func dispatch(action string, payload []byte) []byte {
 		return handleInit(payload)
 	case "status":
 		return handleStatus()
-	case "login":
-		return handleLogin(payload)
-	case "autoLogin":
-		return handleAutoLogin()
-	case "importCookies":
-		return handleImportCookies(payload)
-	case "logout":
-		return handleLogout()
-	case "setDomain":
-		return handleSetDomain(payload)
+	case "setSources":
+		return handleSetSources(payload)
 	case "doctor":
 		return handleDoctor()
-	case "profile":
-		return handleProfile()
 	case "search":
 		return handleSearch(payload)
 	case "bookDetail":
@@ -194,23 +175,28 @@ func handleInit(payload []byte) []byte {
 	_ = os.MkdirAll(dataDir, 0700)
 
 	loadAllLocked()
-	rebuildClientLocked()
-	logInfo("Initialized Tsumo engine in " + dataDir)
+	logInfo("Initialized Tsumo open-archive engine in " + dataDir)
 	return statusPayloadLocked()
 }
 
 func loadAllLocked() {
-	session = sessionData{}
-	if b, err := os.ReadFile(filepath.Join(dataDir, "session.json")); err == nil {
-		_ = json.Unmarshal(b, &session)
+	srcCfg = sourceConfig{EnableGutenberg: true, EnableInternetArchive: true}
+	if b, err := os.ReadFile(filepath.Join(dataDir, "sources.json")); err == nil {
+		_ = json.Unmarshal(b, &srcCfg)
 	}
-	appCfg = appConfigData{}
-	if b, err := os.ReadFile(filepath.Join(dataDir, "config.json")); err == nil {
-		_ = json.Unmarshal(b, &appCfg)
+	if !srcCfg.EnableGutenberg && !srcCfg.EnableInternetArchive {
+		srcCfg.EnableGutenberg = true
+		srcCfg.EnableInternetArchive = true
 	}
+
 	kindleCfg = kindleSecretData{}
 	if b, err := os.ReadFile(filepath.Join(dataDir, "kindle.json")); err == nil {
 		_ = json.Unmarshal(b, &kindleCfg)
+	}
+
+	historyItems = nil
+	if b, err := os.ReadFile(filepath.Join(dataDir, "history.json")); err == nil {
+		_ = json.Unmarshal(b, &historyItems)
 	}
 }
 
@@ -222,65 +208,16 @@ func saveJSONLocked(filename string, v any) error {
 	return os.WriteFile(filepath.Join(dataDir, filename), b, 0600)
 }
 
-func rebuildClientLocked() {
-	c := zlib.NewClient()
-	if session.Mode == string(zlib.ClientModeEAPI) {
-		c.SetMode(zlib.ClientModeEAPI)
-	} else {
-		c.SetMode(zlib.ClientModeHTML)
-	}
-	if strings.TrimSpace(session.Domain) != "" {
-		if allowed, err := zlib.ParseAllowedDomain(session.Domain); err == nil {
-			c.SetDomain(allowed)
-		}
-	} else if session.Mode == string(zlib.ClientModeEAPI) {
-		c.SetDomain(zlib.DefaultEAPIDomain)
-	}
-	if len(session.Cookies) > 0 {
-		c.SetCookies(session.Cookies)
-	}
-	client = c
-}
-
-func getClient() (*zlib.Client, bool) {
-	mu.Lock()
-	defer mu.Unlock()
-	if client == nil {
-		rebuildClientLocked()
-	}
-	loggedIn := len(session.Cookies) > 0
-	return client, loggedIn
-}
-
 func statusPayloadLocked() []byte {
-	domain := session.Domain
-	if domain == "" && client != nil {
-		domain = client.Domain()
-	}
-	if domain == "" {
-		domain = defaultLoginDomain
-	}
-	mode := session.Mode
-	if mode == "" {
-		mode = string(zlib.ClientModeEAPI)
-	}
-	lastEmail := appCfg.LastLoginEmail
-	if lastEmail == "" {
-		lastEmail = defaultLoginEmail
-	}
-	_, loggedOutManually := os.Stat(filepath.Join(dataDir, "logged_out.flag"))
 	return jsonOK(map[string]any{
-		"loggedIn":          len(session.Cookies) > 0,
-		"loggedOutManually": loggedOutManually == nil,
-		"domain":            domain,
-		"mode":              mode,
-		"lastEmail":         lastEmail,
-		"kindleReady":       kindleCfg.Validate() == nil && strings.TrimSpace(kindleCfg.SMTPPassword) != "",
-		"kindleTo":          kindleCfg.To,
-		"kindleFrom":        kindleCfg.From,
-		"kindleSmtpHost":    kindleCfg.SMTPHost,
-		"kindleSmtpPort":    kindleCfg.SMTPPort,
-		"hasSmtpPassword":   strings.TrimSpace(kindleCfg.SMTPPassword) != "",
+		"enableGutenberg":       srcCfg.EnableGutenberg,
+		"enableInternetArchive": srcCfg.EnableInternetArchive,
+		"kindleReady":           kindleCfg.Validate() == nil && strings.TrimSpace(kindleCfg.SMTPPassword) != "",
+		"kindleTo":              kindleCfg.To,
+		"kindleFrom":            kindleCfg.From,
+		"kindleSmtpHost":        kindleCfg.SMTPHost,
+		"kindleSmtpPort":        kindleCfg.SMTPPort,
+		"hasSmtpPassword":       strings.TrimSpace(kindleCfg.SMTPPassword) != "",
 	})
 }
 
@@ -290,402 +227,37 @@ func handleStatus() []byte {
 	return statusPayloadLocked()
 }
 
-func resolveEAPIDomain(ctx context.Context, domain string) (string, error) {
-	check := zlib.ProbeDomainWithOptions(ctx, domain, zlib.DomainProbeOptions{Path: eapiProbePath})
-	if check.Status != zlib.DomainStatusHealthy {
-		return "", fmt.Errorf("%s is not usable for EAPI (%s): try another domain from Mirror Doctor", domain, check.Status)
-	}
-	requested, err := url.Parse(domain)
-	if err != nil {
-		return domain, nil
-	}
-	finalURL, err := url.Parse(check.FinalURL)
-	if err != nil || finalURL.Host == "" || strings.EqualFold(finalURL.Host, requested.Host) {
-		return domain, nil
-	}
-	resolved, err := zlib.ParseAllowedDomain(finalURL.Scheme + "://" + finalURL.Host)
-	if err != nil {
-		return "", fmt.Errorf("%s redirects to %s, which is not an allowed Z-Library domain: %w", domain, finalURL.Host, err)
-	}
-	return resolved, nil
-}
-
-func handleLogin(payload []byte) []byte {
+func handleSetSources(payload []byte) []byte {
 	var req struct {
-		Email    string `json:"email"`
-		Password string `json:"password"`
-		Domain   string `json:"domain"`
-		UseEAPI  bool   `json:"useEapi"`
+		EnableGutenberg       bool `json:"enableGutenberg"`
+		EnableInternetArchive bool `json:"enableInternetArchive"`
 	}
 	if err := json.Unmarshal(payload, &req); err != nil {
 		return jsonError(err)
 	}
-
-	email := strings.TrimSpace(req.Email)
-	if email == "" || req.Password == "" {
-		return jsonError(errors.New("email and password are required"))
-	}
-
-	domain := strings.TrimSpace(req.Domain)
-	if domain == "" {
-		if req.UseEAPI {
-			domain = zlib.DefaultEAPIDomain
-		} else {
-			domain = zlib.DefaultDomain
-		}
-	}
-	allowedDomain, err := zlib.ParseAllowedDomain(domain)
-	if err != nil {
-		return jsonError(err)
-	}
-
-	if req.UseEAPI {
-		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-		resolved, err := resolveEAPIDomain(ctx, allowedDomain)
-		cancel()
-		if err != nil {
-			return jsonError(err)
-		}
-		allowedDomain = resolved
-	}
-
-	c := zlib.NewClient()
-	c.SetDomain(allowedDomain)
-	if req.UseEAPI {
-		err = c.LoginEAPI(email, req.Password)
-	} else {
-		err = c.Login(email, req.Password)
-	}
-	if err != nil {
-		return jsonError(err)
-	}
-
-	mode := string(zlib.ClientModeHTML)
-	if req.UseEAPI {
-		mode = string(zlib.ClientModeEAPI)
+	if !req.EnableGutenberg && !req.EnableInternetArchive {
+		return jsonError(errors.New("at least one open archive source must remain enabled"))
 	}
 
 	mu.Lock()
 	defer mu.Unlock()
-	session = sessionData{
-		Cookies: c.Cookies(),
-		Domain:  c.Domain(),
-		Mode:    mode,
-	}
-	appCfg.LastLoginEmail = email
-	if dataDir != "" {
-		_ = os.Remove(filepath.Join(dataDir, "logged_out.flag"))
-		_ = saveJSONLocked("session.json", session)
-		_ = saveJSONLocked("config.json", appCfg)
-	}
-	client = c
-	return statusPayloadLocked()
-}
-
-func handleAutoLogin() []byte {
-	if strings.TrimSpace(defaultLoginEmail) == "" || strings.TrimSpace(defaultLoginPassword) == "" {
-		return handleStatus()
-	}
-	mu.Lock()
-	alreadyLoggedIn := len(session.Cookies) > 0
-	dir := dataDir
-	mu.Unlock()
-	if alreadyLoggedIn {
-		return handleStatus()
-	}
-	if dir != "" {
-		if _, err := os.Stat(filepath.Join(dir, "logged_out.flag")); err == nil {
-			return handleStatus()
-		}
-	}
-	logInfo("Auto-signing in with bundled credentials")
-	payload, _ := json.Marshal(map[string]any{
-		"email":    defaultLoginEmail,
-		"password": defaultLoginPassword,
-		"domain":   defaultLoginDomain,
-		"useEapi":  true,
-	})
-	return handleLogin(payload)
-}
-
-func handleImportCookies(payload []byte) []byte {
-	var req struct {
-		CookiesText string `json:"cookiesText"`
-		Domain      string `json:"domain"`
-		UseEAPI     bool   `json:"useEapi"`
-	}
-	if err := json.Unmarshal(payload, &req); err != nil {
-		return jsonError(err)
-	}
-
-	domain := strings.TrimSpace(req.Domain)
-	if domain == "" {
-		if req.UseEAPI {
-			domain = zlib.DefaultEAPIDomain
-		} else {
-			domain = zlib.DefaultDomain
-		}
-	}
-	allowedDomain, err := zlib.ParseAllowedDomain(domain)
-	if err != nil {
-		return jsonError(err)
-	}
-
-	cookies, err := parseCookiesInput(req.CookiesText, allowedDomain)
-	if err != nil {
-		return jsonError(err)
-	}
-	if strings.TrimSpace(cookies["remix_userid"]) == "" || strings.TrimSpace(cookies["remix_userkey"]) == "" {
-		return jsonError(errors.New("cookies must include remix_userid and remix_userkey"))
-	}
-
-	mode := string(zlib.ClientModeHTML)
-	if req.UseEAPI {
-		mode = string(zlib.ClientModeEAPI)
-	}
-
-	mu.Lock()
-	defer mu.Unlock()
-	session = sessionData{
-		Cookies: cookies,
-		Domain:  allowedDomain,
-		Mode:    mode,
+	srcCfg = sourceConfig{
+		EnableGutenberg:       req.EnableGutenberg,
+		EnableInternetArchive: req.EnableInternetArchive,
 	}
 	if dataDir != "" {
-		_ = os.Remove(filepath.Join(dataDir, "logged_out.flag"))
-		if err := saveJSONLocked("session.json", session); err != nil {
-			return jsonError(err)
-		}
+		_ = saveJSONLocked("sources.json", srcCfg)
 	}
-	rebuildClientLocked()
-	return statusPayloadLocked()
-}
-
-func parseCookiesInput(raw, domain string) (map[string]string, error) {
-	trimmed := strings.TrimSpace(raw)
-	if trimmed == "" {
-		return nil, errors.New("cookie input is empty")
-	}
-
-	// 1. JSON map format {"remix_userid":"...", "remix_userkey":"..."}
-	if strings.HasPrefix(trimmed, "{") {
-		var m map[string]string
-		if err := json.Unmarshal([]byte(trimmed), &m); err == nil && len(m) > 0 {
-			return m, nil
-		}
-	}
-
-	// 2. Netscape cookie file format
-	if strings.Contains(trimmed, "HTTP Cookie File") || strings.Contains(trimmed, "\t") {
-		target, err := url.ParseRequestURI(domain)
-		if err != nil {
-			return nil, err
-		}
-		cookies := make(map[string]string)
-		scanner := bufio.NewScanner(strings.NewReader(trimmed))
-		now := time.Now()
-		for scanner.Scan() {
-			line := strings.TrimSuffix(scanner.Text(), "\r")
-			if line == "" {
-				continue
-			}
-			if strings.HasPrefix(line, "#HttpOnly_") {
-				line = strings.TrimPrefix(line, "#HttpOnly_")
-			} else if strings.HasPrefix(line, "#") {
-				continue
-			}
-			fields := strings.SplitN(line, "\t", 7)
-			if len(fields) != 7 {
-				continue
-			}
-			cookieHost := strings.ToLower(strings.Trim(strings.TrimSpace(fields[0]), "."))
-			targetHost := strings.ToLower(strings.TrimSuffix(target.Hostname(), "."))
-			if targetHost != cookieHost && !strings.HasSuffix(targetHost, "."+cookieHost) {
-				continue
-			}
-			if fields[5] != "" {
-				// Skip expired
-				if exp, err := parseUnixInt(fields[4]); err == nil && exp > 0 && !time.Unix(exp, 0).After(now) {
-					continue
-				}
-				cookies[fields[5]] = fields[6]
-			}
-		}
-		if len(cookies) > 0 {
-			return cookies, nil
-		}
-	}
-
-	// 3. Semicolon / newline key=value pairs
-	cookies := make(map[string]string)
-	normalized := strings.ReplaceAll(trimmed, "\n", ";")
-	for _, part := range strings.Split(normalized, ";") {
-		part = strings.TrimSpace(part)
-		if part == "" {
-			continue
-		}
-		k, v, ok := strings.Cut(part, "=")
-		if ok {
-			k = strings.TrimSpace(k)
-			v = strings.TrimSpace(v)
-			if k != "" && v != "" {
-				cookies[k] = v
-			}
-		}
-	}
-	if len(cookies) == 0 {
-		return nil, errors.New("could not parse cookies (expected JSON, Netscape cookies.txt, or key=value pairs)")
-	}
-	return cookies, nil
-}
-
-func parseUnixInt(s string) (int64, error) {
-	var n int64
-	_, err := fmt.Sscanf(strings.TrimSpace(s), "%d", &n)
-	return n, err
-}
-
-func handleLogout() []byte {
-	mu.Lock()
-	defer mu.Unlock()
-	if client != nil {
-		client.Logout()
-	}
-	session = sessionData{}
-	if dataDir != "" {
-		_ = os.Remove(filepath.Join(dataDir, "session.json"))
-		_ = os.WriteFile(filepath.Join(dataDir, "logged_out.flag"), []byte("1"), 0600)
-	}
-	rebuildClientLocked()
-	return statusPayloadLocked()
-}
-
-func handleSetDomain(payload []byte) []byte {
-	var req struct {
-		Domain string `json:"domain"`
-		Mode   string `json:"mode"`
-	}
-	if err := json.Unmarshal(payload, &req); err != nil {
-		return jsonError(err)
-	}
-	allowed, err := zlib.ParseAllowedDomain(req.Domain)
-	if err != nil {
-		return jsonError(err)
-	}
-
-	mu.Lock()
-	defer mu.Unlock()
-	session.Domain = allowed
-	if req.Mode == string(zlib.ClientModeEAPI) || req.Mode == string(zlib.ClientModeHTML) {
-		session.Mode = req.Mode
-	}
-	if len(session.Cookies) > 0 && dataDir != "" {
-		_ = saveJSONLocked("session.json", session)
-	}
-	rebuildClientLocked()
 	return statusPayloadLocked()
 }
 
 func handleDoctor() []byte {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-
-	domains := zlib.KnownDomains()
-	htmlChecks := zlib.ProbeDomains(ctx, domains)
-	eapiChecks := zlib.ProbeDomainsWithOptions(ctx, domains, zlib.DomainProbeOptions{Path: eapiProbePath})
-
-	type doctorItem struct {
-		Domain     string            `json:"domain"`
-		Status     zlib.DomainStatus `json:"status"`
-		HTTPStatus int               `json:"http_status,omitempty"`
-		FinalURL   string            `json:"final_url,omitempty"`
-		Detail     string            `json:"detail,omitempty"`
-		EAPIStatus zlib.DomainStatus `json:"eapi_status"`
-		EAPIOK     bool              `json:"eapi_ok"`
-	}
-
-	items := make([]doctorItem, len(htmlChecks))
-	for i, hc := range htmlChecks {
-		ec := eapiChecks[i]
-		items[i] = doctorItem{
-			Domain:     hc.Domain,
-			Status:     hc.Status,
-			HTTPStatus: hc.HTTPStatus,
-			FinalURL:   hc.FinalURL,
-			Detail:     hc.Detail,
-			EAPIStatus: ec.Status,
-			EAPIOK:     ec.Status == zlib.DomainStatusHealthy,
-		}
-	}
-
+	checks := checkOpenSources(ctx)
 	return jsonOK(map[string]any{
-		"checks": items,
+		"checks": checks,
 	})
-}
-
-func handleProfile() []byte {
-	c, loggedIn := getClient()
-	if !loggedIn {
-		return jsonError(zlib.ErrNotLoggedIn)
-	}
-	limits, err := c.GetLimits()
-	if err != nil {
-		return jsonError(err)
-	}
-	return jsonOK(map[string]any{
-		"daily_amount":    limits.DailyAmount,
-		"daily_allowed":   limits.DailyAllowed,
-		"daily_remaining": limits.DailyRemaining,
-		"daily_reset":     limits.DailyReset,
-	})
-}
-
-type bookDTO struct {
-	zlib.Book
-	CommandID string `json:"command_id"`
-}
-
-func bookIDFromURL(u string) string {
-	parts := strings.Split(u, "/")
-	for i, p := range parts {
-		if p == "book" && i+1 < len(parts) {
-			return parts[i+1]
-		}
-	}
-	return u
-}
-
-func bookCommandID(book zlib.Book) string {
-	if book.ID != "" && book.Hash != "" {
-		return book.ID + ":" + book.Hash
-	}
-	id := bookIDFromURL(book.URL)
-	if id == book.URL {
-		return ""
-	}
-	return id
-}
-
-func absolutizeCover(domain, cover string) string {
-	cover = strings.TrimSpace(cover)
-	if cover == "" || strings.HasPrefix(cover, "http://") || strings.HasPrefix(cover, "https://") {
-		return cover
-	}
-	if strings.HasPrefix(cover, "//") {
-		return "https:" + cover
-	}
-	if strings.HasPrefix(cover, "/") {
-		return strings.TrimRight(domain, "/") + cover
-	}
-	return cover
-}
-
-func toBookDTO(domain string, b zlib.Book) bookDTO {
-	b.Cover = absolutizeCover(domain, b.Cover)
-	return bookDTO{
-		Book:      b,
-		CommandID: bookCommandID(b),
-	}
 }
 
 func handleSearch(payload []byte) []byte {
@@ -705,70 +277,37 @@ func handleSearch(payload []byte) []byte {
 		return jsonError(err)
 	}
 
-	c, loggedIn := getClient()
-	if !loggedIn {
-		return jsonError(zlib.ErrNotLoggedIn)
-	}
 	query := strings.TrimSpace(req.Query)
 	if query == "" {
-		return jsonError(zlib.ErrEmptyQuery)
-	}
-	if req.Page <= 0 {
-		req.Page = 1
-	}
-	if req.Count <= 0 {
-		req.Count = 24
+		return jsonError(errors.New("search query cannot be empty"))
 	}
 
-	var exts []zlib.Extension
-	for _, e := range req.Extensions {
-		e = strings.TrimSpace(strings.ToUpper(e))
-		if e != "" && e != "ALL" {
-			exts = append(exts, zlib.Extension(e))
-		}
-	}
-	var langs []zlib.Language
-	for _, l := range req.Languages {
-		l = strings.TrimSpace(strings.ToLower(l))
-		if l != "" && l != "all" {
-			langs = append(langs, zlib.Language(l))
-		}
-	}
+	mu.Lock()
+	gb := srcCfg.EnableGutenberg
+	ia := srcCfg.EnableInternetArchive
+	mu.Unlock()
 
-	var opts *zlib.SearchOptions
-	if req.Exact || req.FromYear > 0 || req.ToYear > 0 || len(exts) > 0 || len(langs) > 0 {
-		opts = &zlib.SearchOptions{
-			Exact:      req.Exact,
-			FromYear:   req.FromYear,
-			ToYear:     req.ToYear,
-			Languages:  langs,
-			Extensions: exts,
-		}
-	}
+	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
+	defer cancel()
 
-	var res zlib.SearchResult
-	var err error
-	if req.FullText {
-		var ftOpts zlib.FullTextSearchOptions
-		if opts != nil {
-			ftOpts.SearchOptions = *opts
-		}
-		ftOpts.Phrase = req.Phrase
-		res, err = c.FullTextSearch(query, req.Page, req.Count, &ftOpts)
-	} else {
-		res, err = c.Search(query, req.Page, req.Count, opts)
-	}
+	res, err := searchOpenArchives(ctx, SearchRequest{
+		Query:      query,
+		Page:       req.Page,
+		Count:      req.Count,
+		Extensions: req.Extensions,
+		Languages:  req.Languages,
+		FromYear:   req.FromYear,
+		ToYear:     req.ToYear,
+		Exact:      req.Exact,
+		FullText:   req.FullText,
+		Phrase:     req.Phrase,
+	}, gb, ia)
 	if err != nil {
 		return jsonError(err)
 	}
 
-	dtos := make([]bookDTO, 0, len(res.Books))
-	for _, b := range res.Books {
-		dtos = append(dtos, toBookDTO(c.Domain(), b))
-	}
-
 	return jsonOK(map[string]any{
-		"books":       dtos,
+		"books":       res.Books,
 		"page":        res.Page,
 		"total_pages": res.TotalPages,
 	})
@@ -781,16 +320,15 @@ func handleBookDetail(payload []byte) []byte {
 	if err := json.Unmarshal(payload, &req); err != nil {
 		return jsonError(err)
 	}
-	c, loggedIn := getClient()
-	if !loggedIn {
-		return jsonError(zlib.ErrNotLoggedIn)
-	}
-	b, err := c.FetchBook(strings.TrimSpace(req.BookID))
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	b, err := fetchOpenBookDetail(ctx, req.BookID)
 	if err != nil {
 		return jsonError(err)
 	}
 	return jsonOK(map[string]any{
-		"book": toBookDTO(c.Domain(), b),
+		"book": b,
 	})
 }
 
@@ -800,13 +338,11 @@ func handleStartDownload(payload []byte) []byte {
 		BookID     string `json:"bookId"`
 		DirectURL  string `json:"directUrl"`
 		DestDir    string `json:"destDir"`
+		Title      string `json:"title"`
+		Extension  string `json:"extension"`
 	}
 	if err := json.Unmarshal(payload, &req); err != nil {
 		return jsonError(err)
-	}
-	c, loggedIn := getClient()
-	if !loggedIn {
-		return jsonError(zlib.ErrNotLoggedIn)
 	}
 	if strings.TrimSpace(req.DownloadID) == "" || strings.TrimSpace(req.DestDir) == "" {
 		return jsonError(errors.New("downloadId and destDir are required"))
@@ -828,21 +364,37 @@ func handleStartDownload(payload []byte) []byte {
 
 	go func() {
 		dlURL := strings.TrimSpace(req.DirectURL)
-		if dlURL == "" {
-			book, err := c.FetchBook(strings.TrimSpace(req.BookID))
+		title := strings.TrimSpace(req.Title)
+		ext := strings.TrimSpace(req.Extension)
+		var resolvedBook *Book
+
+		if dlURL == "" && strings.TrimSpace(req.BookID) != "" {
+			b, err := fetchOpenBookDetail(ctx, req.BookID)
 			if err != nil {
 				dlMu.Lock()
-				st.State = "error"
-				st.Error = err.Error()
+				if errors.Is(err, context.Canceled) || st.State == "cancelled" {
+					st.State = "cancelled"
+				} else {
+					st.State = "error"
+					st.Error = err.Error()
+				}
 				dlMu.Unlock()
 				return
 			}
-			dlURL = book.DownloadURL
+			resolvedBook = &b
+			dlURL = b.DownloadURL
+			if title == "" {
+				title = b.Name
+			}
+			if ext == "" {
+				ext = b.Extension
+			}
 		}
+
 		if dlURL == "" {
 			dlMu.Lock()
 			st.State = "error"
-			st.Error = "no download URL available for this book"
+			st.Error = "no downloadable file URL available for this book"
 			dlMu.Unlock()
 			return
 		}
@@ -855,7 +407,7 @@ func handleStartDownload(payload []byte) []byte {
 		st.State = "downloading"
 		dlMu.Unlock()
 
-		res, err := c.DownloadWithContext(ctx, dlURL, req.DestDir, func(written, total int64) {
+		res, err := downloadFileWithProgress(ctx, dlURL, req.DestDir, title, ext, func(written, total int64) {
 			dlMu.Lock()
 			st.Written = written
 			st.Total = total
@@ -863,7 +415,6 @@ func handleStartDownload(payload []byte) []byte {
 		})
 
 		dlMu.Lock()
-		defer dlMu.Unlock()
 		if err != nil {
 			if errors.Is(err, context.Canceled) || st.State == "cancelled" {
 				st.State = "cancelled"
@@ -871,6 +422,7 @@ func handleStartDownload(payload []byte) []byte {
 				st.State = "error"
 				st.Error = err.Error()
 			}
+			dlMu.Unlock()
 			return
 		}
 		st.FilePath = res.FilePath
@@ -880,9 +432,63 @@ func handleStartDownload(payload []byte) []byte {
 			st.Total = res.Size
 		}
 		st.State = "complete"
+		dlMu.Unlock()
+
+		recordHistory(req.BookID, title, ext, dlURL, res.Size, resolvedBook)
 	}()
 
 	return jsonOK(map[string]any{"downloadId": req.DownloadID})
+}
+
+func recordHistory(bookID, title, ext, dlURL string, sizeBytes int64, resolved *Book) {
+	if title == "" && resolved != nil {
+		title = resolved.Name
+	}
+	if title == "" {
+		return
+	}
+	if ext == "" && resolved != nil {
+		ext = resolved.Extension
+	}
+	pageURL := ""
+	source := ""
+	id := bookID
+	if resolved != nil {
+		pageURL = resolved.URL
+		source = resolved.Source
+		if resolved.ID != "" {
+			id = resolved.ID
+		}
+	}
+	entry := HistoryEntry{
+		ID:          id,
+		CommandID:   bookID,
+		Name:        title,
+		URL:         pageURL,
+		DownloadURL: dlURL,
+		Extension:   ext,
+		Size:        formatByteSize(sizeBytes),
+		Date:        time.Now().Format("2006-01-02"),
+		Source:      source,
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	filtered := make([]HistoryEntry, 0, len(historyItems)+1)
+	filtered = append(filtered, entry)
+	for _, existing := range historyItems {
+		if existing.CommandID == entry.CommandID && entry.CommandID != "" {
+			continue
+		}
+		filtered = append(filtered, existing)
+		if len(filtered) >= 100 {
+			break
+		}
+	}
+	historyItems = filtered
+	if dataDir != "" {
+		_ = saveJSONLocked("history.json", historyItems)
+	}
 }
 
 func handleDownloadProgress(payload []byte) []byte {
@@ -930,22 +536,6 @@ func handleCancelDownload(payload []byte) []byte {
 	return jsonOK(nil)
 }
 
-type historyItemDTO struct {
-	zlib.DownloadHistoryItem
-	CommandID string `json:"command_id"`
-}
-
-func historyCommandID(item zlib.DownloadHistoryItem) string {
-	if item.ID != "" && item.Hash != "" {
-		return item.ID + ":" + item.Hash
-	}
-	id := bookIDFromURL(item.URL)
-	if id == item.URL {
-		return ""
-	}
-	return id
-}
-
 func handleHistory(payload []byte) []byte {
 	var req struct {
 		Page int `json:"page"`
@@ -955,27 +545,33 @@ func handleHistory(payload []byte) []byte {
 		req.Page = 1
 	}
 
-	c, loggedIn := getClient()
-	if !loggedIn {
-		return jsonError(zlib.ErrNotLoggedIn)
-	}
-	res, err := c.DownloadHistory(req.Page)
-	if err != nil {
-		return jsonError(err)
-	}
+	mu.Lock()
+	all := make([]HistoryEntry, len(historyItems))
+	copy(all, historyItems)
+	mu.Unlock()
 
-	items := make([]historyItemDTO, 0, len(res.Items))
-	for _, it := range res.Items {
-		items = append(items, historyItemDTO{
-			DownloadHistoryItem: it,
-			CommandID:           historyCommandID(it),
+	const pageSize = 25
+	totalPages := (len(all) + pageSize - 1) / pageSize
+	if totalPages <= 0 {
+		totalPages = 1
+	}
+	start := (req.Page - 1) * pageSize
+	if start >= len(all) {
+		return jsonOK(map[string]any{
+			"items":       []HistoryEntry{},
+			"page":        req.Page,
+			"total_pages": totalPages,
 		})
+	}
+	end := start + pageSize
+	if end > len(all) {
+		end = len(all)
 	}
 
 	return jsonOK(map[string]any{
-		"items":       items,
-		"page":        res.Page,
-		"total_pages": res.TotalPages,
+		"items":       all[start:end],
+		"page":        req.Page,
+		"total_pages": totalPages,
 	})
 }
 
@@ -993,7 +589,7 @@ func handleSaveKindle(payload []byte) []byte {
 	if req.SMTPPort <= 0 {
 		req.SMTPPort = 587
 	}
-	cfg := zlib.KindleConfig{
+	cfg := KindleConfig{
 		To:       strings.TrimSpace(req.To),
 		From:     strings.TrimSpace(req.From),
 		SMTPHost: strings.TrimSpace(req.SMTPHost),
@@ -1037,7 +633,7 @@ func handleSendToKindle(payload []byte) []byte {
 	pass := kindleCfg.SMTPPassword
 	mu.Unlock()
 
-	if err := zlib.SendToKindle(strings.TrimSpace(req.FilePath), cfg, pass); err != nil {
+	if err := sendToKindle(strings.TrimSpace(req.FilePath), cfg, pass); err != nil {
 		return jsonError(err)
 	}
 	return jsonOK(map[string]any{

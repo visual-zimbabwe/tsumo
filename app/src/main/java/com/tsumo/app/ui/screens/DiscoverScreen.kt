@@ -55,13 +55,13 @@ import com.tsumo.app.ui.components.SharpSquareCheckbox
 import com.tsumo.app.ui.theme.EBGaramondFamily
 import com.tsumo.app.ui.theme.TsumoColors
 
-private val ExtFilters = listOf("ALL", "EPUB", "PDF", "MOBI", "AZW3")
+private val ExtFilters = listOf("ALL", "EPUB", "PDF", "MOBI")
 private val ArchivalSeeds = listOf(
-    "Norwegian Wood",
-    "The Old Man and the Sea",
-    "No Longer Human",
-    "The Metamorphosis",
     "Meditations",
+    "The Art of War",
+    "Pride and Prejudice",
+    "The Metamorphosis",
+    "The Republic",
     "The Book of Tea",
 )
 
@@ -73,7 +73,6 @@ fun DiscoverScreen(
     onSelectExt: (String) -> Unit,
     onUpdateAdvancedFilters: (String, String, String, Boolean) -> Unit,
     onSelectBook: (BookItem) -> Unit,
-    onOpenAccount: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val focusManager = LocalFocusManager.current
@@ -115,7 +114,7 @@ fun DiscoverScreen(
                         Box(modifier = Modifier.padding(vertical = 8.dp)) {
                             if (state.searchQuery.isEmpty()) {
                                 Text(
-                                    text = "Search book...",
+                                    text = "Search open archives...",
                                     fontFamily = EBGaramondFamily,
                                     fontSize = 21.sp,
                                     lineHeight = 28.sp,
@@ -225,7 +224,7 @@ fun DiscoverScreen(
                         onValueChange = {
                             onUpdateAdvancedFilters(it, state.filterFromYear, state.filterToYear, state.filterExact)
                         },
-                        placeholder = "english, japanese...",
+                        placeholder = "english, french...",
                         label = "Language",
                         modifier = Modifier.weight(1.4f),
                     )
@@ -234,7 +233,7 @@ fun DiscoverScreen(
                         onValueChange = {
                             onUpdateAdvancedFilters(state.filterLanguage, it, state.filterToYear, state.filterExact)
                         },
-                        placeholder = "1900",
+                        placeholder = "1800",
                         label = "From",
                         keyboardType = KeyboardType.Number,
                         modifier = Modifier.weight(0.8f),
@@ -289,52 +288,6 @@ fun DiscoverScreen(
 
         // Main Body
         when {
-            !state.status.loggedIn && state.authLoading && state.discoverBooks.isEmpty() -> {
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(top = 64.dp),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    Text(
-                        text = "Connecting to archive…",
-                        fontFamily = EBGaramondFamily,
-                        fontStyle = FontStyle.Italic,
-                        fontSize = 19.sp,
-                        color = TsumoColors.Secondary,
-                    )
-                }
-            }
-
-            !state.status.loggedIn && state.discoverBooks.isEmpty() -> {
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(top = 36.dp),
-                    verticalArrangement = Arrangement.spacedBy(16.dp),
-                ) {
-                    Text(
-                        text = "Archive session required",
-                        style = MaterialTheme.typography.headlineSmall.copy(
-                            fontStyle = FontStyle.Italic,
-                            color = TsumoColors.Primary,
-                        ),
-                    )
-                    Text(
-                        text = "Sign in with your Z-Library credentials or import session cookies to search, inspect records, and download editions directly to your device.",
-                        style = MaterialTheme.typography.bodyMedium.copy(
-                            color = TsumoColors.OnSurfaceVariant,
-                        ),
-                    )
-                    Spacer(modifier = Modifier.height(4.dp))
-                    PrimaryTypographicAction(
-                        label = "Open account & sign in",
-                        trailing = state.status.domain.removePrefix("https://"),
-                        onClick = onOpenAccount,
-                    )
-                }
-            }
-
             state.discoverLoading -> {
                 Box(
                     modifier = Modifier
@@ -343,7 +296,7 @@ fun DiscoverScreen(
                     contentAlignment = Alignment.Center,
                 ) {
                     Text(
-                        text = "Querying archive…",
+                        text = "Querying open archives…",
                         fontFamily = EBGaramondFamily,
                         fontStyle = FontStyle.Italic,
                         fontSize = 19.sp,

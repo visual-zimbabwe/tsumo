@@ -54,7 +54,6 @@ fun CatalogScreen(
     onTogglePhrase: () -> Unit,
     onSearchFullText: (Int) -> Unit,
     onSelectBook: (BookItem) -> Unit,
-    onOpenAccount: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val focusManager = LocalFocusManager.current
@@ -85,34 +84,7 @@ fun CatalogScreen(
             )
         }
 
-        if (!state.status.loggedIn) {
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(top = 36.dp),
-                verticalArrangement = Arrangement.spacedBy(14.dp),
-            ) {
-                Text(
-                    text = "Archive session required",
-                    style = MaterialTheme.typography.headlineSmall.copy(
-                        fontStyle = FontStyle.Italic,
-                        color = TsumoColors.Primary,
-                    ),
-                )
-                Text(
-                    text = "Sign in to view your Z-Library cloud download history and query book interiors with full-text search.",
-                    style = MaterialTheme.typography.bodyMedium.copy(color = TsumoColors.OnSurfaceVariant),
-                )
-                PrimaryTypographicAction(
-                    label = "Open account & sign in",
-                    onClick = onOpenAccount,
-                )
-            }
-            return@Column
-        }
-
         if (state.catalogSection == 0) {
-            // Cloud Download History
             when {
                 state.historyLoading -> {
                     Box(
@@ -155,7 +127,7 @@ fun CatalogScreen(
                         horizontalAlignment = Alignment.CenterHorizontally,
                     ) {
                         Text(
-                            text = "No cloud history entries",
+                            text = "No download history yet",
                             fontFamily = EBGaramondFamily,
                             fontStyle = FontStyle.Italic,
                             fontSize = 20.sp,
@@ -199,7 +171,7 @@ fun CatalogScreen(
 
                         items(
                             items = state.historyItems,
-                            key = { it.url.ifBlank { it.name + it.date } },
+                            key = { it.commandId.ifBlank { it.url.ifBlank { it.name + it.date } } },
                         ) { item ->
                             Column(
                                 modifier = Modifier
@@ -282,7 +254,7 @@ fun CatalogScreen(
                 }
             }
         } else {
-            // Full-Text Inside-Book Search
+            // Internet Archive Full-Text Search
             Column(modifier = Modifier.fillMaxSize()) {
                 Row(
                     modifier = Modifier.fillMaxWidth(),
@@ -309,7 +281,7 @@ fun CatalogScreen(
                             Box(modifier = Modifier.padding(vertical = 8.dp)) {
                                 if (state.fullTextQuery.isEmpty()) {
                                     Text(
-                                        text = "Search inside book passages…",
+                                        text = "Search inside book text (Internet Archive)…",
                                         fontFamily = EBGaramondFamily,
                                         fontSize = 20.sp,
                                         color = TsumoColors.Secondary.copy(alpha = 0.5f),
@@ -347,7 +319,7 @@ fun CatalogScreen(
                 Spacer(modifier = Modifier.height(10.dp))
                 SharpSquareCheckbox(
                     checked = state.fullTextPhrase,
-                    label = "Exact phrase (2+ words, HTML mode)",
+                    label = "Exact phrase match",
                     onToggle = onTogglePhrase,
                 )
                 Spacer(modifier = Modifier.height(12.dp))
@@ -387,7 +359,7 @@ fun CatalogScreen(
                             contentAlignment = Alignment.Center,
                         ) {
                             Text(
-                                text = "Enter words or a passage to search book interiors",
+                                text = "Enter words or a passage to search inside public texts",
                                 style = MaterialTheme.typography.bodySmall.copy(color = TsumoColors.Outline),
                             )
                         }

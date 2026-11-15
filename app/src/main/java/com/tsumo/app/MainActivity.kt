@@ -60,7 +60,7 @@ class MainActivity : ComponentActivity() {
                     Column(modifier = Modifier.fillMaxSize()) {
                         TsumoTopBar(
                             currentTab = state.currentTab,
-                            loggedIn = state.status.loggedIn,
+                            sourcesActive = state.status.enableGutenberg || state.status.enableInternetArchive,
                             onAccountClick = vm::openAccountSheet,
                         )
 
@@ -73,7 +73,6 @@ class MainActivity : ComponentActivity() {
                                     onSelectExt = vm::selectExtFilter,
                                     onUpdateAdvancedFilters = vm::updateAdvancedFilters,
                                     onSelectBook = vm::openBookDrawer,
-                                    onOpenAccount = vm::openAccountSheet,
                                 )
 
                                 TsumoTab.CATALOG -> CatalogScreen(
@@ -84,7 +83,6 @@ class MainActivity : ComponentActivity() {
                                     onTogglePhrase = vm::toggleFullTextPhrase,
                                     onSearchFullText = vm::searchFullText,
                                     onSelectBook = vm::openBookDrawer,
-                                    onOpenAccount = vm::openAccountSheet,
                                 )
 
                                 TsumoTab.SHELVES -> ShelvesScreen(
@@ -118,11 +116,7 @@ class MainActivity : ComponentActivity() {
                     AccountSheetOverlay(
                         state = state,
                         onDismiss = vm::closeAccountSheet,
-                        onLogin = vm::login,
-                        onImportCookies = vm::importCookies,
-                        onLogout = vm::logout,
-                        onSwitchDomain = vm::switchDomain,
-                        onRefreshProfile = vm::refreshProfile,
+                        onUpdateSources = vm::updateSources,
                         onRunDoctor = vm::runDoctor,
                         onSaveKindle = vm::saveKindleConfig,
                     )
