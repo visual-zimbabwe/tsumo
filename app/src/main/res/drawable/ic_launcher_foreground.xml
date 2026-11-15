@@ -1,0 +1,18 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <path
+        android:fillColor="#FAF9F5"
+        android:pathData="M0,0h108v108h-108z" />
+    <!-- Minimalist editorial folio frame + serif T monogram -->
+    <path
+        android:fillColor="#00000000"
+        android:strokeColor="#291200"
+        android:strokeWidth="2.2"
+        android:pathData="M34,26h40v56h-40z" />
+    <path
+        android:fillColor="#291200"
+        android:pathData="M42,40h24v3.2h-10.3v24.8h-3.4v-24.8h-10.3z" />
+</vector>
