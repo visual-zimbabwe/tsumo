@@ -1,0 +1,10 @@
+<resources>
+    <style name="Theme.Tsumo" parent="android:Theme.Material.Light.NoActionBar">
+        <item name="android:windowBackground">@color/tsumo_surface</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+    </style>
+
+    <color name="tsumo_surface">#FAF9F5</color>
+    <color name="tsumo_primary">#291200</color>
+</resources>
