@@ -72,7 +72,7 @@ import com.tsumo.app.ui.theme.TsumoColors
 @Composable
 fun TsumoTopBar(
     currentTab: TsumoTab,
-    loggedIn: Boolean,
+    sourcesActive: Boolean,
     onAccountClick: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -121,7 +121,7 @@ fun TsumoTopBar(
                 tint = TsumoColors.OnPrimary,
                 modifier = Modifier.size(18.dp),
             )
-            if (!loggedIn) {
+            if (!sourcesActive) {
                 Canvas(
                     modifier = Modifier
                         .align(Alignment.TopEnd)

@@ -8,22 +8,22 @@ import org.junit.Test
 class ModelsTest {
     @Test
     fun bookItemFormattingMatchesEditorialSpec() {
-        val eapiBook = BookItem(
-            id = "12345",
-            commandId = "",
-            hash = "abc123",
-            name = "Norwegian Wood",
-            authors = listOf("Haruki Murakami"),
-            year = "1987",
+        val book = BookItem(
+            id = "2680",
+            commandId = "gutenberg:2680",
+            source = "gutenberg",
+            name = "Meditations",
+            authors = listOf("Marcus Aurelius"),
+            year = "180",
             extension = "epub",
-            size = "1.4 MB",
+            size = "0.5 MB",
         )
-        assertEquals("12345:abc123", eapiBook.effectiveId)
-        assertEquals("Haruki Murakami", eapiBook.authorsDisplay)
-        assertEquals("1987", eapiBook.yearDisplay)
-        assertEquals("EPUB · 1.4 MB", eapiBook.packageDisplay)
+        assertEquals("gutenberg:2680", book.effectiveId)
+        assertEquals("Marcus Aurelius", book.authorsDisplay)
+        assertEquals("180", book.yearDisplay)
+        assertEquals("EPUB · 0.5 MB", book.packageDisplay)
 
-        val zeroYearBook = eapiBook.copy(year = "0", extension = "", size = "")
+        val zeroYearBook = book.copy(year = "0", extension = "", size = "")
         assertEquals("—", zeroYearBook.yearDisplay)
         assertEquals("—", zeroYearBook.packageDisplay)
     }
@@ -31,15 +31,17 @@ class ModelsTest {
     @Test
     fun historyItemConvertsToBookItem() {
         val hist = HistoryItem(
-            id = "OarG6e3pPD",
-            commandId = "OarG6e3pPD",
-            name = "The Metamorphosis",
-            extension = "pdf",
-            size = "0.8 MB",
+            id = "gutenberg:2680",
+            commandId = "gutenberg:2680",
+            source = "gutenberg",
+            name = "Meditations",
+            extension = "epub",
+            size = "0.5 MB",
             date = "2026-11-14",
         )
         val book = hist.toBookItem()
-        assertEquals("OarG6e3pPD", book.effectiveId)
-        assertEquals("PDF · 0.8 MB", book.packageDisplay)
+        assertEquals("gutenberg:2680", book.effectiveId)
+        assertEquals("gutenberg", book.source)
+        assertEquals("EPUB · 0.5 MB", book.packageDisplay)
     }
 }

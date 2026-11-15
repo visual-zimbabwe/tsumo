@@ -5,15 +5,14 @@ import android.content.Intent
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.tsumo.app.data.BookItem
-import com.tsumo.app.data.DoctorCheck
 import com.tsumo.app.data.DownloadProgress
 import com.tsumo.app.data.EngineStatus
 import com.tsumo.app.data.HistoryItem
 import com.tsumo.app.data.LocalShelfBook
-import com.tsumo.app.data.ProfileLimits
 import com.tsumo.app.data.ShelfStore
+import com.tsumo.app.data.SourceCheck
 import com.tsumo.app.data.TsumoTab
-import com.tsumo.app.engine.ZlibEngine
+import com.tsumo.app.engine.ArchiveEngine
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -28,9 +27,6 @@ data class TsumoUiState(
     val initialized: Boolean = false,
     val currentTab: TsumoTab = TsumoTab.DISCOVER,
     val status: EngineStatus = EngineStatus(),
-    val profile: ProfileLimits? = null,
-    val profileLoading: Boolean = false,
-    val profileError: String? = null,
 
     // Discover
     val searchQuery: String = "",
@@ -75,12 +71,11 @@ data class TsumoUiState(
     val detailError: String? = null,
     val activeDownload: DownloadProgress? = null,
 
-    // Account Sheet
+    // Settings Sheet (Sources, Doctor, Kindle)
     val accountOpen: Boolean = false,
-    val authLoading: Boolean = false,
-    val authError: String? = null,
+    val sourcesSaving: Boolean = false,
     val doctorLoading: Boolean = false,
-    val doctorResults: List<DoctorCheck> = emptyList(),
+    val doctorResults: List<SourceCheck> = emptyList(),
     val doctorError: String? = null,
     val kindleSaving: Boolean = false,
 
@@ -99,37 +94,18 @@ class TsumoViewModel(application: Application) : AndroidViewModel(application) {
     init {
         viewModelScope.launch {
             runCatching {
-                var status = ZlibEngine.init(getApplication<Application>().filesDir.absolutePath)
+                val status = ArchiveEngine.init(getApplication<Application>().filesDir.absolutePath)
                 val downloaded = shelfStore.loadDownloaded()
                 val bookmarks = shelfStore.loadBookmarks()
                 _uiState.update {
                     it.copy(
                         initialized = true,
                         status = status,
-                        authLoading = !status.loggedIn && !status.loggedOutManually,
                         downloadedBooks = downloaded,
                         bookmarkedBooks = bookmarks,
                     )
                 }
-                if (!status.loggedIn && !status.loggedOutManually) {
-                    runCatching { ZlibEngine.autoLogin() }
-                        .onSuccess { loggedInStatus ->
-                            status = loggedInStatus
-                            _uiState.update { it.copy(status = loggedInStatus, authLoading = false) }
-                        }
-                        .onFailure { err ->
-                            _uiState.update {
-                                it.copy(
-                                    authLoading = false,
-                                    authError = err.message,
-                                )
-                            }
-                        }
-                }
-                if (status.loggedIn) {
-                    refreshProfile()
-                    loadHistory(1)
-                }
+                loadHistory(1)
             }.onFailure { err ->
                 _uiState.update { it.copy(initialized = true) }
                 showToast(err.message ?: "Engine initialization failed")
@@ -139,7 +115,7 @@ class TsumoViewModel(application: Application) : AndroidViewModel(application) {
 
     fun selectTab(tab: TsumoTab) {
         _uiState.update { it.copy(currentTab = tab) }
-        if (tab == TsumoTab.CATALOG && _uiState.value.status.loggedIn && _uiState.value.historyItems.isEmpty()) {
+        if (tab == TsumoTab.CATALOG && _uiState.value.historyItems.isEmpty()) {
             loadHistory(1)
         }
     }
@@ -151,7 +127,7 @@ class TsumoViewModel(application: Application) : AndroidViewModel(application) {
     fun selectExtFilter(ext: String) {
         _uiState.update { it.copy(selectedExtFilter = ext) }
         val activeQ = _uiState.value.activeSearchQuery.ifBlank { _uiState.value.searchQuery.trim() }
-        if (activeQ.isNotBlank() && _uiState.value.status.loggedIn) {
+        if (activeQ.isNotBlank()) {
             searchBooks(activeQ, 1)
         }
     }
@@ -180,11 +156,6 @@ class TsumoViewModel(application: Application) : AndroidViewModel(application) {
             }
             return
         }
-        if (!_uiState.value.status.loggedIn) {
-            _uiState.update { it.copy(accountOpen = true) }
-            showToast("Sign in to search archive")
-            return
-        }
 
         _uiState.update {
             it.copy(
@@ -203,7 +174,7 @@ class TsumoViewModel(application: Application) : AndroidViewModel(application) {
 
         viewModelScope.launch {
             runCatching {
-                ZlibEngine.search(
+                ArchiveEngine.search(
                     query = q,
                     page = page,
                     count = 24,
@@ -235,16 +206,15 @@ class TsumoViewModel(application: Application) : AndroidViewModel(application) {
 
     fun setCatalogSection(section: Int) {
         _uiState.update { it.copy(catalogSection = section) }
-        if (section == 0 && _uiState.value.status.loggedIn && _uiState.value.historyItems.isEmpty()) {
+        if (section == 0 && _uiState.value.historyItems.isEmpty()) {
             loadHistory(1)
         }
     }
 
     fun loadHistory(page: Int = 1) {
-        if (!_uiState.value.status.loggedIn) return
         _uiState.update { it.copy(historyLoading = true, historyError = null) }
         viewModelScope.launch {
-            runCatching { ZlibEngine.history(page) }
+            runCatching { ArchiveEngine.history(page) }
                 .onSuccess { res ->
                     _uiState.update {
                         it.copy(
@@ -277,11 +247,7 @@ class TsumoViewModel(application: Application) : AndroidViewModel(application) {
     fun searchFullText(page: Int = 1) {
         val q = _uiState.value.fullTextQuery.trim()
         if (q.isBlank()) return
-        if (!_uiState.value.status.loggedIn) {
-            _uiState.update { it.copy(accountOpen = true) }
-            showToast("Sign in to search archive")
-            return
-        }
+
         val phrase = _uiState.value.fullTextPhrase
         val state = _uiState.value
         val exts = if (state.selectedExtFilter == "ALL") emptyList() else listOf(state.selectedExtFilter)
@@ -290,7 +256,7 @@ class TsumoViewModel(application: Application) : AndroidViewModel(application) {
         _uiState.update { it.copy(fullTextLoading = true, fullTextError = null) }
         viewModelScope.launch {
             runCatching {
-                ZlibEngine.search(
+                ArchiveEngine.search(
                     query = q,
                     page = page,
                     count = 20,
@@ -335,25 +301,29 @@ class TsumoViewModel(application: Application) : AndroidViewModel(application) {
             )
         }
         val ref = book.effectiveId
-        if (ref.isBlank() || !_uiState.value.status.loggedIn) {
+        if (ref.isBlank()) {
             _uiState.update { it.copy(detailLoading = false) }
             return
         }
         viewModelScope.launch {
-            runCatching { ZlibEngine.bookDetail(ref) }
+            runCatching { ArchiveEngine.bookDetail(ref) }
                 .onSuccess { detailed ->
                     _uiState.update { state ->
                         if (state.selectedBook?.effectiveId == ref || state.selectedBook?.name == book.name) {
                             val merged = detailed.copy(
                                 id = detailed.id.ifBlank { book.id },
                                 commandId = detailed.commandId.ifBlank { book.commandId },
-                                hash = detailed.hash.ifBlank { book.hash },
                                 cover = detailed.cover.ifBlank { book.cover },
                                 authors = detailed.authors.ifEmpty { book.authors },
+                                publisher = detailed.publisher.ifBlank { book.publisher },
                                 year = detailed.year.ifBlank { book.year },
+                                language = detailed.language.ifBlank { book.language },
                                 extension = detailed.extension.ifBlank { book.extension },
                                 size = detailed.size.ifBlank { book.size },
+                                description = detailed.description.ifBlank { book.description },
+                                categories = detailed.categories.ifBlank { book.categories },
                                 downloadUrl = detailed.downloadUrl.ifBlank { book.downloadUrl },
+                                source = detailed.source.ifBlank { book.source },
                             )
                             state.copy(selectedBook = merged, detailLoading = false)
                         } else {
@@ -378,11 +348,6 @@ class TsumoViewModel(application: Application) : AndroidViewModel(application) {
 
     fun downloadSelectedBook(sendToKindleAfter: Boolean = false) {
         val book = _uiState.value.selectedBook ?: return
-        if (!_uiState.value.status.loggedIn) {
-            _uiState.update { it.copy(accountOpen = true) }
-            showToast("Sign in to download")
-            return
-        }
         if (sendToKindleAfter && !_uiState.value.status.kindleReady) {
             _uiState.update { it.copy(accountOpen = true) }
             showToast("Configure Kindle SMTP first")
@@ -407,11 +372,13 @@ class TsumoViewModel(application: Application) : AndroidViewModel(application) {
         downloadPollJob?.cancel()
         downloadPollJob = viewModelScope.launch {
             runCatching {
-                ZlibEngine.startDownload(
+                ArchiveEngine.startDownload(
                     downloadId = dlId,
                     bookId = book.effectiveId,
                     directUrl = book.downloadUrl,
                     destDir = shelfStore.booksDir.absolutePath,
+                    title = book.name,
+                    extension = book.extension,
                 )
             }.onFailure { err ->
                 _uiState.update { it.copy(activeDownload = DownloadProgress(dlId, "error", error = err.message ?: "Failed")) }
@@ -421,14 +388,14 @@ class TsumoViewModel(application: Application) : AndroidViewModel(application) {
 
             while (isActive) {
                 delay(180)
-                val prog = runCatching { ZlibEngine.downloadProgress(dlId) }.getOrNull() ?: continue
+                val prog = runCatching { ArchiveEngine.downloadProgress(dlId) }.getOrNull() ?: continue
                 _uiState.update { it.copy(activeDownload = prog) }
                 when (prog.state) {
                     "complete" -> {
                         val saved = shelfStore.saveDownloadedEntry(book, prog.filePath, prog.size)
                         val all = shelfStore.loadDownloaded()
                         _uiState.update { it.copy(downloadedBooks = all) }
-                        refreshProfile()
+                        loadHistory(1)
                         if (sendToKindleAfter) {
                             sendFileToKindle(saved.filePath, saved.key)
                         } else {
@@ -452,7 +419,7 @@ class TsumoViewModel(application: Application) : AndroidViewModel(application) {
     fun cancelActiveDownload() {
         val dlId = _uiState.value.activeDownload?.id ?: return
         viewModelScope.launch {
-            runCatching { ZlibEngine.cancelDownload(dlId) }
+            runCatching { ArchiveEngine.cancelDownload(dlId) }
             downloadPollJob?.cancel()
             _uiState.update { it.copy(activeDownload = null) }
             showToast("Download cancelled")
@@ -506,7 +473,7 @@ class TsumoViewModel(application: Application) : AndroidViewModel(application) {
         }
         _uiState.update { it.copy(sendingToKindleKey = key) }
         viewModelScope.launch {
-            runCatching { ZlibEngine.sendToKindle(filePath) }
+            runCatching { ArchiveEngine.sendToKindle(filePath) }
                 .onSuccess { toAddr ->
                     _uiState.update { it.copy(sendingToKindleKey = null) }
                     showToast("Sent to $toAddr")
@@ -518,117 +485,26 @@ class TsumoViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    // Account & CLI Settings
+    // Sources, Doctor & Kindle Settings
     fun openAccountSheet() {
-        _uiState.update { it.copy(accountOpen = true, authError = null) }
-        if (_uiState.value.status.loggedIn) {
-            refreshProfile()
-        }
+        _uiState.update { it.copy(accountOpen = true) }
     }
 
     fun closeAccountSheet() {
         _uiState.update { it.copy(accountOpen = false) }
     }
 
-    fun refreshProfile() {
-        if (!_uiState.value.status.loggedIn) return
-        _uiState.update { it.copy(profileLoading = true, profileError = null) }
+    fun updateSources(enableGutenberg: Boolean, enableInternetArchive: Boolean) {
+        _uiState.update { it.copy(sourcesSaving = true) }
         viewModelScope.launch {
-            runCatching { ZlibEngine.profile() }
-                .onSuccess { limits ->
-                    _uiState.update { it.copy(profileLoading = false, profile = limits) }
+            runCatching { ArchiveEngine.setSources(enableGutenberg, enableInternetArchive) }
+                .onSuccess { status ->
+                    _uiState.update { it.copy(sourcesSaving = false, status = status) }
+                    showToast("Archive sources updated")
                 }
                 .onFailure { err ->
-                    _uiState.update {
-                        it.copy(
-                            profileLoading = false,
-                            profileError = err.message ?: "Could not load quota",
-                        )
-                    }
-                }
-        }
-    }
-
-    fun login(email: String, password: String, domain: String, useEapi: Boolean) {
-        _uiState.update { it.copy(authLoading = true, authError = null) }
-        viewModelScope.launch {
-            runCatching { ZlibEngine.login(email, password, domain, useEapi) }
-                .onSuccess { status ->
-                    _uiState.update {
-                        it.copy(
-                            authLoading = false,
-                            status = status,
-                            authError = null,
-                        )
-                    }
-                    showToast("Signed in to Z-Library")
-                    refreshProfile()
-                    loadHistory(1)
-                }
-                .onFailure { err ->
-                    _uiState.update {
-                        it.copy(
-                            authLoading = false,
-                            authError = err.message ?: "Login failed",
-                        )
-                    }
-                }
-        }
-    }
-
-    fun importCookies(cookiesText: String, domain: String, useEapi: Boolean) {
-        _uiState.update { it.copy(authLoading = true, authError = null) }
-        viewModelScope.launch {
-            runCatching { ZlibEngine.importCookies(cookiesText, domain, useEapi) }
-                .onSuccess { status ->
-                    _uiState.update {
-                        it.copy(
-                            authLoading = false,
-                            status = status,
-                            authError = null,
-                        )
-                    }
-                    showToast("Session cookies imported")
-                    refreshProfile()
-                    loadHistory(1)
-                }
-                .onFailure { err ->
-                    _uiState.update {
-                        it.copy(
-                            authLoading = false,
-                            authError = err.message ?: "Cookie import failed",
-                        )
-                    }
-                }
-        }
-    }
-
-    fun logout() {
-        viewModelScope.launch {
-            runCatching { ZlibEngine.logout() }
-                .onSuccess { status ->
-                    _uiState.update {
-                        it.copy(
-                            status = status,
-                            profile = null,
-                            historyItems = emptyList(),
-                        )
-                    }
-                    showToast("Signed out")
-                }
-        }
-    }
-
-    fun switchDomain(domain: String, mode: String) {
-        viewModelScope.launch {
-            runCatching { ZlibEngine.setDomain(domain, mode) }
-                .onSuccess { status ->
-                    _uiState.update { it.copy(status = status) }
-                    showToast("Domain set to $domain")
-                    if (status.loggedIn) refreshProfile()
-                }
-                .onFailure { err ->
-                    showToast(err.message ?: "Invalid domain")
+                    _uiState.update { it.copy(sourcesSaving = false) }
+                    showToast(err.message ?: "Could not update sources")
                 }
         }
     }
@@ -636,7 +512,7 @@ class TsumoViewModel(application: Application) : AndroidViewModel(application) {
     fun runDoctor() {
         _uiState.update { it.copy(doctorLoading = true, doctorError = null) }
         viewModelScope.launch {
-            runCatching { ZlibEngine.doctor() }
+            runCatching { ArchiveEngine.doctor() }
                 .onSuccess { results ->
                     _uiState.update { it.copy(doctorLoading = false, doctorResults = results) }
                 }
@@ -644,7 +520,7 @@ class TsumoViewModel(application: Application) : AndroidViewModel(application) {
                     _uiState.update {
                         it.copy(
                             doctorLoading = false,
-                            doctorError = err.message ?: "Doctor check failed",
+                            doctorError = err.message ?: "Source check failed",
                         )
                     }
                 }
@@ -654,7 +530,7 @@ class TsumoViewModel(application: Application) : AndroidViewModel(application) {
     fun saveKindleConfig(to: String, from: String, smtpHost: String, smtpPort: Int, password: String) {
         _uiState.update { it.copy(kindleSaving = true) }
         viewModelScope.launch {
-            runCatching { ZlibEngine.saveKindle(to, from, smtpHost, smtpPort, password) }
+            runCatching { ArchiveEngine.saveKindle(to, from, smtpHost, smtpPort, password) }
                 .onSuccess { status ->
                     _uiState.update { it.copy(kindleSaving = false, status = status) }
                     showToast("Kindle configuration saved")

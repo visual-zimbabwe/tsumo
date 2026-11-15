@@ -4,7 +4,7 @@
 
 extern void* TsumoCall(const char* action, int actionLen, const char* payload, int payloadLen, int* outLen);
 
-JNIEXPORT jbyteArray JNICALL Java_com_tsumo_app_engine_ZlibEngine_nativeCall(
+JNIEXPORT jbyteArray JNICALL Java_com_tsumo_app_engine_ArchiveEngine_nativeCall(
     JNIEnv* env,
     jobject thiz,
     jbyteArray actionArr,

@@ -20,11 +20,10 @@ data class BookItem(
     val categories: String = "",
     val edition: String = "",
     val downloadUrl: String = "",
+    val source: String = "",
 ) {
     val effectiveId: String
-        get() = commandId.ifBlank {
-            if (id.isNotBlank() && hash.isNotBlank()) "$id:$hash" else id
-        }
+        get() = commandId.ifBlank { id }
 
     val authorsDisplay: String
         get() = authors.filter { it.isNotBlank() }.joinToString(", ")
@@ -42,55 +41,44 @@ data class BookItem(
 data class HistoryItem(
     val id: String = "",
     val commandId: String = "",
-    val hash: String = "",
     val name: String,
     val url: String = "",
     val downloadUrl: String = "",
     val extension: String = "",
     val size: String = "",
     val date: String = "",
+    val source: String = "",
 ) {
     fun toBookItem(): BookItem = BookItem(
         id = id,
         commandId = commandId,
-        hash = hash,
         url = url,
         name = name,
         extension = extension,
         size = size,
         downloadUrl = downloadUrl,
+        source = source,
     )
 }
 
-data class DoctorCheck(
+data class SourceCheck(
     val domain: String,
+    val name: String,
     val status: String,
     val httpStatus: Int = 0,
-    val finalUrl: String = "",
     val detail: String = "",
-    val eapiStatus: String = "",
-    val eapiOk: Boolean = false,
+    val ok: Boolean = false,
 )
 
 data class EngineStatus(
-    val loggedIn: Boolean = false,
-    val loggedOutManually: Boolean = false,
-    val domain: String = "https://z-lib.gd",
-    val mode: String = "eapi",
-    val lastEmail: String = "",
+    val enableGutenberg: Boolean = true,
+    val enableInternetArchive: Boolean = true,
     val kindleReady: Boolean = false,
     val kindleTo: String = "",
     val kindleFrom: String = "",
     val kindleSmtpHost: String = "smtp.gmail.com",
     val kindleSmtpPort: Int = 587,
     val hasSmtpPassword: Boolean = false,
-)
-
-data class ProfileLimits(
-    val dailyAmount: Int = 0,
-    val dailyAllowed: Int = 0,
-    val dailyRemaining: Int = 0,
-    val dailyReset: String = "",
 )
 
 data class DownloadProgress(
