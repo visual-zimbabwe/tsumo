@@ -20,7 +20,7 @@ export CGO_ENABLED=1
 export GOOS=android
 export GOARCH=arm64
 
-go build -ldflags="-s -w" -buildmode=c-shared -o "$DEST_DIR/libtsumo.so" .
+go build -tags sqlite_fts5 -ldflags="-s -w" -buildmode=c-shared -o "$DEST_DIR/libtsumo.so" .
 
 echo "=== Verification ==="
 ls -lh "$DEST_DIR/libtsumo.so"

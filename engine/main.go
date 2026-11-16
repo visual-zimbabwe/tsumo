@@ -19,12 +19,13 @@ static void tsumo_log(int prio, const char* msg) {
 #endif
 */
 import "C"
-
 import (
 	"context"
+	_ "embed"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -33,54 +34,32 @@ import (
 	"unsafe"
 )
 
-type sourceConfig struct {
-	EnableGutenberg       bool `json:"enable_gutenberg"`
-	EnableInternetArchive bool `json:"enable_internet_archive"`
+//go:embed default_urls.txt
+var defaultNewsboatURLs string
+
+type appSettings struct {
+	OpenMode     string `json:"open_mode"`      // reader | custom_tab | browser
+	KeepReadDays int    `json:"keep_read_days"` // 0 = keep forever, default 30
 }
 
-type kindleSecretData struct {
-	KindleConfig
+type deliverySecretData struct {
+	EmailDeliveryConfig
 	SMTPPassword string `json:"smtp_password,omitempty"`
 }
 
-type HistoryEntry struct {
-	ID          string `json:"id"`
-	CommandID   string `json:"command_id"`
-	Name        string `json:"name"`
-	URL         string `json:"url"`
-	DownloadURL string `json:"download_url"`
-	Extension   string `json:"extension"`
-	Size        string `json:"size"`
-	Date        string `json:"date"`
-	Source      string `json:"source,omitempty"`
-}
-
-type downloadState struct {
-	ID       string             `json:"id"`
-	State    string             `json:"state"` // fetching, downloading, complete, error, cancelled
-	Written  int64              `json:"written"`
-	Total    int64              `json:"total"`
-	FilePath string             `json:"file_path,omitempty"`
-	Size     int64              `json:"size,omitempty"`
-	Error    string             `json:"error,omitempty"`
-	cancel   context.CancelFunc `json:"-"`
-}
-
 var (
-	mu           sync.Mutex
-	dataDir      string
-	srcCfg       = sourceConfig{EnableGutenberg: true, EnableInternetArchive: true}
-	kindleCfg    kindleSecretData
-	historyItems []HistoryEntry
-
-	dlMu      sync.Mutex
-	downloads = make(map[string]*downloadState)
+	stateMu    sync.Mutex
+	dataDir    string
+	db         *DB
+	httpClient = newHTTPClient(25 * time.Second)
+	settings   = appSettings{OpenMode: "reader", KeepReadDays: 30}
+	delivery   deliverySecretData
 )
 
 func logInfo(msg string) {
-	cMsg := C.CString(msg)
-	C.tsumo_log(C.ANDROID_LOG_INFO, cMsg)
-	C.free(unsafe.Pointer(cMsg))
+	cs := C.CString(msg)
+	defer C.free(unsafe.Pointer(cs))
+	C.tsumo_log(C.ANDROID_LOG_INFO, cs)
 }
 
 //export TsumoCall
@@ -89,13 +68,15 @@ func TsumoCall(actionPtr *C.char, actionLen C.int, payloadPtr *C.char, payloadLe
 	if actionPtr != nil && actionLen > 0 {
 		action = C.GoStringN(actionPtr, actionLen)
 	}
-	payload := []byte("{}")
+	var payload []byte
 	if payloadPtr != nil && payloadLen > 0 {
 		payload = C.GoBytes(unsafe.Pointer(payloadPtr), payloadLen)
 	}
 
 	resp := dispatch(action, payload)
-	*outLen = C.int(len(resp))
+	if outLen != nil {
+		*outLen = C.int(len(resp))
+	}
 	if len(resp) == 0 {
 		return nil
 	}
@@ -129,26 +110,58 @@ func dispatch(action string, payload []byte) []byte {
 		return handleInit(payload)
 	case "status":
 		return handleStatus()
-	case "setSources":
-		return handleSetSources(payload)
-	case "doctor":
-		return handleDoctor()
+	case "saveSettings":
+		return handleSaveSettings(payload)
+	case "discoverFeed":
+		return handleDiscoverFeed(payload)
+	case "addFeed":
+		return handleAddFeed(payload)
+	case "removeFeed":
+		return handleRemoveFeed(payload)
+	case "updateFeed":
+		return handleUpdateFeed(payload)
+	case "reorderFeeds":
+		return handleReorderFeeds(payload)
+	case "listFeeds":
+		return handleListFeeds()
+	case "refresh":
+		return handleRefresh(payload)
+	case "listItems":
+		return handleListItems(payload)
+	case "getArticle":
+		return handleGetArticle(payload)
+	case "articleContent":
+		return handleArticleContent(payload)
+	case "exportMarkdown":
+		return handleExportMarkdown(payload)
 	case "search":
 		return handleSearch(payload)
-	case "bookDetail":
-		return handleBookDetail(payload)
-	case "startDownload":
-		return handleStartDownload(payload)
-	case "downloadProgress":
-		return handleDownloadProgress(payload)
-	case "cancelDownload":
-		return handleCancelDownload(payload)
+	case "markRead":
+		return handleMarkRead(payload)
+	case "markFeedRead":
+		return handleMarkFeedRead(payload)
+	case "setArchived":
+		return handleSetArchived(payload)
+	case "recordOpen":
+		return handleRecordOpen(payload)
 	case "history":
 		return handleHistory(payload)
-	case "saveKindle":
-		return handleSaveKindle(payload)
-	case "sendToKindle":
-		return handleSendToKindle(payload)
+	case "removeHistory":
+		return handleRemoveHistory(payload)
+	case "clearHistory":
+		return handleClearHistory()
+	case "importUrls":
+		return handleImportURLs(payload)
+	case "exportUrls":
+		return handleExportURLs()
+	case "importOpml":
+		return handleImportOPML(payload)
+	case "exportOpml":
+		return handleExportOPML()
+	case "saveDelivery":
+		return handleSaveDelivery(payload)
+	case "sendDelivery":
+		return handleSendDelivery(payload)
 	default:
 		return jsonError(fmt.Errorf("unknown action: %s", action))
 	}
@@ -159,44 +172,64 @@ func handleInit(payload []byte) []byte {
 		DataDir string `json:"dataDir"`
 	}
 	if err := json.Unmarshal(payload, &req); err != nil {
-		return jsonError(err)
+		return jsonError(fmt.Errorf("invalid init payload: %w", err))
 	}
 	if strings.TrimSpace(req.DataDir) == "" {
 		return jsonError(errors.New("dataDir is required"))
 	}
+	if err := os.MkdirAll(req.DataDir, 0o755); err != nil {
+		return jsonError(fmt.Errorf("create dataDir: %w", err))
+	}
 
-	// Ensure Go's crypto/x509 finds Android Conscrypt APEX and legacy cacerts.
-	_ = os.Setenv("SSL_CERT_DIR", "/apex/com.android.conscrypt/cacerts:/system/etc/security/cacerts")
+	stateMu.Lock()
+	defer stateMu.Unlock()
 
-	mu.Lock()
-	defer mu.Unlock()
-
+	if db != nil {
+		_ = db.Close()
+		db = nil
+	}
 	dataDir = req.DataDir
-	_ = os.MkdirAll(dataDir, 0700)
+	opened, err := OpenDB(filepath.Join(dataDir, "tsumo.db"))
+	if err != nil {
+		return jsonError(fmt.Errorf("open database: %w", err))
+	}
+	db = opened
+	loadSettingsLocked()
+	seedDefaultFeedsLocked()
+	if settings.KeepReadDays > 0 {
+		_, _ = db.PruneOldReadItems(settings.KeepReadDays)
+	}
 
-	loadAllLocked()
-	logInfo("Initialized Tsumo open-archive engine in " + dataDir)
+	logInfo("Engine initialized at " + dataDir)
 	return statusPayloadLocked()
 }
 
-func loadAllLocked() {
-	srcCfg = sourceConfig{EnableGutenberg: true, EnableInternetArchive: true}
-	if b, err := os.ReadFile(filepath.Join(dataDir, "sources.json")); err == nil {
-		_ = json.Unmarshal(b, &srcCfg)
+func loadSettingsLocked() {
+	settings = appSettings{OpenMode: "reader", KeepReadDays: 30}
+	if raw, err := os.ReadFile(filepath.Join(dataDir, "settings.json")); err == nil {
+		_ = json.Unmarshal(raw, &settings)
 	}
-	if !srcCfg.EnableGutenberg && !srcCfg.EnableInternetArchive {
-		srcCfg.EnableGutenberg = true
-		srcCfg.EnableInternetArchive = true
-	}
-
-	kindleCfg = kindleSecretData{}
-	if b, err := os.ReadFile(filepath.Join(dataDir, "kindle.json")); err == nil {
-		_ = json.Unmarshal(b, &kindleCfg)
+	if settings.OpenMode == "" {
+		settings.OpenMode = "reader"
 	}
 
-	historyItems = nil
-	if b, err := os.ReadFile(filepath.Join(dataDir, "history.json")); err == nil {
-		_ = json.Unmarshal(b, &historyItems)
+	delivery = deliverySecretData{
+		EmailDeliveryConfig: EmailDeliveryConfig{
+			SMTPHost: "smtp.gmail.com",
+			SMTPPort: 587,
+		},
+	}
+	deliveryPath := filepath.Join(dataDir, "delivery.json")
+	if raw, err := os.ReadFile(deliveryPath); err == nil {
+		_ = json.Unmarshal(raw, &delivery)
+	} else if legacy, err := os.ReadFile(filepath.Join(dataDir, "kindle.json")); err == nil {
+		_ = json.Unmarshal(legacy, &delivery)
+	}
+	if delivery.SMTPHost == "" {
+		delivery.SMTPHost = "smtp.gmail.com"
+	}
+	if delivery.SMTPPort == 0 {
+		delivery.SMTPPort = 587
 	}
 }
 
@@ -205,391 +238,659 @@ func saveJSONLocked(filename string, v any) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(filepath.Join(dataDir, filename), b, 0600)
+	return os.WriteFile(filepath.Join(dataDir, filename), b, 0o600)
+}
+
+func seedDefaultFeedsLocked() {
+	if db == nil {
+		return
+	}
+	if _, ok := db.GetMeta("seeded_default_urls"); ok {
+		return
+	}
+	res := ParseNewsboatURLs(defaultNewsboatURLs)
+	for _, entry := range res.Entries {
+		_, _ = db.UpsertFeed(entry.URL, entry.CustomTitle, "", entry.CustomTitle, entry.Tags)
+	}
+	_ = db.SetMeta("seeded_default_urls", "1")
+}
+
+func getDB() (*DB, error) {
+	stateMu.Lock()
+	defer stateMu.Unlock()
+	if db == nil {
+		return nil, errors.New("engine not initialized")
+	}
+	return db, nil
 }
 
 func statusPayloadLocked() []byte {
+	feedCount := 0
+	unreadCount := 0
+	archivedCount := 0
+	if db != nil {
+		_ = db.sql.QueryRow(`SELECT COUNT(*) FROM feeds`).Scan(&feedCount)
+		_ = db.sql.QueryRow(`SELECT COUNT(*) FROM items WHERE unread = 1`).Scan(&unreadCount)
+		_ = db.sql.QueryRow(`SELECT COUNT(*) FROM items WHERE archived = 1`).Scan(&archivedCount)
+	}
 	return jsonOK(map[string]any{
-		"enableGutenberg":       srcCfg.EnableGutenberg,
-		"enableInternetArchive": srcCfg.EnableInternetArchive,
-		"kindleReady":           kindleCfg.Validate() == nil && strings.TrimSpace(kindleCfg.SMTPPassword) != "",
-		"kindleTo":              kindleCfg.To,
-		"kindleFrom":            kindleCfg.From,
-		"kindleSmtpHost":        kindleCfg.SMTPHost,
-		"kindleSmtpPort":        kindleCfg.SMTPPort,
-		"hasSmtpPassword":       strings.TrimSpace(kindleCfg.SMTPPassword) != "",
+		"open_mode":          settings.OpenMode,
+		"keep_read_days":     settings.KeepReadDays,
+		"feed_count":         feedCount,
+		"unread_count":       unreadCount,
+		"archived_count":     archivedCount,
+		"delivery_ready":     delivery.EmailDeliveryConfig.Validate() == nil && delivery.SMTPPassword != "",
+		"delivery_to":        delivery.To,
+		"delivery_from":      delivery.From,
+		"delivery_smtp_host": delivery.SMTPHost,
+		"delivery_smtp_port": delivery.SMTPPort,
+		"has_smtp_password":  delivery.SMTPPassword != "",
 	})
 }
 
 func handleStatus() []byte {
-	mu.Lock()
-	defer mu.Unlock()
+	stateMu.Lock()
+	defer stateMu.Unlock()
 	return statusPayloadLocked()
 }
 
-func handleSetSources(payload []byte) []byte {
+func handleSaveSettings(payload []byte) []byte {
+	var req appSettings
+	if err := json.Unmarshal(payload, &req); err != nil {
+		return jsonError(err)
+	}
+	switch req.OpenMode {
+	case "reader", "custom_tab", "browser":
+	default:
+		req.OpenMode = "reader"
+	}
+	if req.KeepReadDays < 0 {
+		req.KeepReadDays = 0
+	}
+
+	stateMu.Lock()
+	defer stateMu.Unlock()
+	settings = req
+	if dataDir != "" {
+		if err := saveJSONLocked("settings.json", settings); err != nil {
+			return jsonError(err)
+		}
+	}
+	if db != nil && settings.KeepReadDays > 0 {
+		_, _ = db.PruneOldReadItems(settings.KeepReadDays)
+	}
+	return statusPayloadLocked()
+}
+
+func handleDiscoverFeed(payload []byte) []byte {
 	var req struct {
-		EnableGutenberg       bool `json:"enableGutenberg"`
-		EnableInternetArchive bool `json:"enableInternetArchive"`
+		URL string `json:"url"`
 	}
 	if err := json.Unmarshal(payload, &req); err != nil {
 		return jsonError(err)
 	}
-	if !req.EnableGutenberg && !req.EnableInternetArchive {
-		return jsonError(errors.New("at least one open archive source must remain enabled"))
-	}
-
-	mu.Lock()
-	defer mu.Unlock()
-	srcCfg = sourceConfig{
-		EnableGutenberg:       req.EnableGutenberg,
-		EnableInternetArchive: req.EnableInternetArchive,
-	}
-	if dataDir != "" {
-		_ = saveJSONLocked("sources.json", srcCfg)
-	}
-	return statusPayloadLocked()
-}
-
-func handleDoctor() []byte {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	checks := checkOpenSources(ctx)
+	disc, _, err := DiscoverFeed(ctx, httpClient, req.URL)
+	if err != nil {
+		return jsonError(err)
+	}
 	return jsonOK(map[string]any{
-		"checks": checks,
+		"feed": disc,
 	})
 }
 
-func handleSearch(payload []byte) []byte {
+func handleAddFeed(payload []byte) []byte {
+	database, err := getDB()
+	if err != nil {
+		return jsonError(err)
+	}
 	var req struct {
-		Query      string   `json:"query"`
-		Page       int      `json:"page"`
-		Count      int      `json:"count"`
-		Extensions []string `json:"extensions"`
-		Languages  []string `json:"languages"`
-		FromYear   int      `json:"fromYear"`
-		ToYear     int      `json:"toYear"`
-		Exact      bool     `json:"exact"`
-		FullText   bool     `json:"fullText"`
-		Phrase     bool     `json:"phrase"`
+		URL         string   `json:"url"`
+		CustomTitle string   `json:"custom_title"`
+		Tags        []string `json:"tags"`
 	}
 	if err := json.Unmarshal(payload, &req); err != nil {
 		return jsonError(err)
 	}
-
-	query := strings.TrimSpace(req.Query)
-	if query == "" {
-		return jsonError(errors.New("search query cannot be empty"))
-	}
-
-	mu.Lock()
-	gb := srcCfg.EnableGutenberg
-	ia := srcCfg.EnableInternetArchive
-	mu.Unlock()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
 	defer cancel()
 
-	res, err := searchOpenArchives(ctx, SearchRequest{
-		Query:      query,
-		Page:       req.Page,
-		Count:      req.Count,
-		Extensions: req.Extensions,
-		Languages:  req.Languages,
-		FromYear:   req.FromYear,
-		ToYear:     req.ToYear,
-		Exact:      req.Exact,
-		FullText:   req.FullText,
-		Phrase:     req.Phrase,
-	}, gb, ia)
+	disc, parsed, err := DiscoverFeed(ctx, httpClient, req.URL)
 	if err != nil {
 		return jsonError(err)
 	}
 
+	feed, err := database.UpsertFeed(disc.URL, disc.Title, disc.SiteURL, req.CustomTitle, req.Tags)
+	if err != nil {
+		return jsonError(err)
+	}
+
+	newCount := 0
+	if parsed != nil {
+		displayTitle := feed.DisplayTitle()
+		articles := convertFeedItems(parsed, time.Now().Unix())
+		newCount, _ = database.UpsertItems(feed.ID, displayTitle, articles)
+		_ = database.UpdateFeedFetchState(feed.ID, disc.Title, disc.SiteURL, "", "", "", time.Now().Unix())
+	}
+	feed, _ = database.GetFeed(feed.ID)
 	return jsonOK(map[string]any{
-		"books":       res.Books,
-		"page":        res.Page,
-		"total_pages": res.TotalPages,
+		"feed":      feed,
+		"new_items": newCount,
 	})
 }
 
-func handleBookDetail(payload []byte) []byte {
+func handleRemoveFeed(payload []byte) []byte {
+	database, err := getDB()
+	if err != nil {
+		return jsonError(err)
+	}
 	var req struct {
-		BookID string `json:"bookId"`
+		ID int64 `json:"id"`
 	}
 	if err := json.Unmarshal(payload, &req); err != nil {
+		return jsonError(err)
+	}
+	if err := database.RemoveFeed(req.ID); err != nil {
+		return jsonError(err)
+	}
+	return jsonOK(nil)
+}
+
+func handleUpdateFeed(payload []byte) []byte {
+	database, err := getDB()
+	if err != nil {
+		return jsonError(err)
+	}
+	var req struct {
+		ID          int64    `json:"id"`
+		CustomTitle string   `json:"custom_title"`
+		Tags        []string `json:"tags"`
+		Position    *int     `json:"position"`
+	}
+	if err := json.Unmarshal(payload, &req); err != nil {
+		return jsonError(err)
+	}
+	if err := database.UpdateFeedMeta(req.ID, "", "", req.CustomTitle, req.Tags, req.Position); err != nil {
+		return jsonError(err)
+	}
+	f, _ := database.GetFeed(req.ID)
+	return jsonOK(map[string]any{"feed": f})
+}
+
+func handleReorderFeeds(payload []byte) []byte {
+	database, err := getDB()
+	if err != nil {
+		return jsonError(err)
+	}
+	var req struct {
+		IDs []int64 `json:"ids"`
+	}
+	if err := json.Unmarshal(payload, &req); err != nil {
+		return jsonError(err)
+	}
+	if err := database.ReorderFeeds(req.IDs); err != nil {
+		return jsonError(err)
+	}
+	return jsonOK(nil)
+}
+
+func handleListFeeds() []byte {
+	database, err := getDB()
+	if err != nil {
+		return jsonError(err)
+	}
+	feeds, err := database.ListFeeds()
+	if err != nil {
+		return jsonError(err)
+	}
+	if feeds == nil {
+		feeds = []Feed{}
+	}
+	tagMap := make(map[string]int)
+	totalUnread := 0
+	for _, f := range feeds {
+		totalUnread += f.UnreadCount
+		for _, t := range f.Tags {
+			tagMap[t] += f.UnreadCount
+		}
+	}
+	return jsonOK(map[string]any{
+		"feeds":        feeds,
+		"total_unread": totalUnread,
+		"tag_unreads":  tagMap,
+	})
+}
+
+func handleRefresh(payload []byte) []byte {
+	database, err := getDB()
+	if err != nil {
+		return jsonError(err)
+	}
+	var req struct {
+		FeedIDs []int64 `json:"feed_ids"`
+	}
+	if len(payload) > 0 {
+		_ = json.Unmarshal(payload, &req)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	res, err := RefreshFeeds(ctx, database, httpClient, req.FeedIDs)
+	if err != nil {
+		return jsonError(err)
+	}
+	if res.Errors == nil {
+		res.Errors = []RefreshError{}
+	}
+	return jsonOK(map[string]any{
+		"refreshed": res.Refreshed,
+		"new_items": res.NewItems,
+		"errors":    res.Errors,
+	})
+}
+
+func handleListItems(payload []byte) []byte {
+	database, err := getDB()
+	if err != nil {
+		return jsonError(err)
+	}
+	var req struct {
+		FeedID int64  `json:"feed_id"`
+		Tag    string `json:"tag"`
+		Filter string `json:"filter"` // all | unread | archived
+		Offset int    `json:"offset"`
+		Limit  int    `json:"limit"`
+	}
+	if len(payload) > 0 {
+		if err := json.Unmarshal(payload, &req); err != nil {
+			return jsonError(err)
+		}
+	}
+	items, err := database.ListItems(req.FeedID, req.Tag, req.Filter, req.Offset, req.Limit)
+	if err != nil {
+		return jsonError(err)
+	}
+	if items == nil {
+		items = []Article{}
+	}
+	return jsonOK(map[string]any{
+		"items": items,
+	})
+}
+
+func handleGetArticle(payload []byte) []byte {
+	database, err := getDB()
+	if err != nil {
+		return jsonError(err)
+	}
+	var req struct {
+		ID int64 `json:"id"`
+	}
+	if err := json.Unmarshal(payload, &req); err != nil {
+		return jsonError(err)
+	}
+	art, err := database.GetArticle(req.ID)
+	if err != nil {
+		return jsonError(err)
+	}
+	return jsonOK(map[string]any{"article": art})
+}
+
+func handleArticleContent(payload []byte) []byte {
+	database, err := getDB()
+	if err != nil {
+		return jsonError(err)
+	}
+	var req struct {
+		ID int64 `json:"id"`
+	}
+	if err := json.Unmarshal(payload, &req); err != nil {
+		return jsonError(err)
+	}
+	art, err := database.GetArticle(req.ID)
+	if err != nil {
+		return jsonError(err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	cleanHTML, err := FetchReadableContent(ctx, httpClient, art)
+	if err != nil {
+		return jsonError(err)
+	}
+	// Cache extracted readability HTML if article is archived or had thin feed content
+	if art.FullText == "" && len(cleanHTML) > len(art.Content) {
+		_ = database.SaveFullText(art.ID, cleanHTML)
+	}
+	paragraphs := ArticleToPlainParagraphs(cleanHTML)
+	if paragraphs == nil {
+		paragraphs = []string{}
+	}
+	return jsonOK(map[string]any{
+		"html":       cleanHTML,
+		"paragraphs": paragraphs,
+	})
+}
+
+func handleExportMarkdown(payload []byte) []byte {
+	database, err := getDB()
+	if err != nil {
+		return jsonError(err)
+	}
+	var req struct {
+		ID int64 `json:"id"`
+	}
+	if err := json.Unmarshal(payload, &req); err != nil {
+		return jsonError(err)
+	}
+	art, err := database.GetArticle(req.ID)
+	if err != nil {
 		return jsonError(err)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-
-	b, err := fetchOpenBookDetail(ctx, req.BookID)
+	cleanHTML, err := FetchReadableContent(ctx, httpClient, art)
 	if err != nil {
 		return jsonError(err)
 	}
+	markdown, filename := ArticleToMarkdown(art, cleanHTML)
 	return jsonOK(map[string]any{
-		"book": b,
+		"markdown": markdown,
+		"filename": filename,
 	})
 }
 
-func handleStartDownload(payload []byte) []byte {
+func handleSearch(payload []byte) []byte {
+	database, err := getDB()
+	if err != nil {
+		return jsonError(err)
+	}
 	var req struct {
-		DownloadID string `json:"downloadId"`
-		BookID     string `json:"bookId"`
-		DirectURL  string `json:"directUrl"`
-		DestDir    string `json:"destDir"`
-		Title      string `json:"title"`
-		Extension  string `json:"extension"`
+		Query string `json:"query"`
+		Scope string `json:"scope"` // all | archived | history
+		Limit int    `json:"limit"`
 	}
 	if err := json.Unmarshal(payload, &req); err != nil {
 		return jsonError(err)
 	}
-	if strings.TrimSpace(req.DownloadID) == "" || strings.TrimSpace(req.DestDir) == "" {
-		return jsonError(errors.New("downloadId and destDir are required"))
+	q := strings.TrimSpace(req.Query)
+	if q == "" {
+		return jsonOK(map[string]any{
+			"items": []Article{},
+			"feeds": []Feed{},
+		})
 	}
-	if err := os.MkdirAll(req.DestDir, 0755); err != nil {
+
+	items, err := database.SearchFTS(q, req.Scope, req.Limit)
+	if err != nil {
 		return jsonError(err)
 	}
-
-	ctx, cancel := context.WithCancel(context.Background())
-	st := &downloadState{
-		ID:     req.DownloadID,
-		State:  "fetching",
-		cancel: cancel,
+	if items == nil {
+		items = []Article{}
 	}
 
-	dlMu.Lock()
-	downloads[req.DownloadID] = st
-	dlMu.Unlock()
-
-	go func() {
-		dlURL := strings.TrimSpace(req.DirectURL)
-		title := strings.TrimSpace(req.Title)
-		ext := strings.TrimSpace(req.Extension)
-		var resolvedBook *Book
-
-		if dlURL == "" && strings.TrimSpace(req.BookID) != "" {
-			b, err := fetchOpenBookDetail(ctx, req.BookID)
-			if err != nil {
-				dlMu.Lock()
-				if errors.Is(err, context.Canceled) || st.State == "cancelled" {
-					st.State = "cancelled"
-				} else {
-					st.State = "error"
-					st.Error = err.Error()
-				}
-				dlMu.Unlock()
-				return
-			}
-			resolvedBook = &b
-			dlURL = b.DownloadURL
-			if title == "" {
-				title = b.Name
-			}
-			if ext == "" {
-				ext = b.Extension
-			}
-		}
-
-		if dlURL == "" {
-			dlMu.Lock()
-			st.State = "error"
-			st.Error = "no downloadable file URL available for this book"
-			dlMu.Unlock()
-			return
-		}
-
-		dlMu.Lock()
-		if st.State == "cancelled" {
-			dlMu.Unlock()
-			return
-		}
-		st.State = "downloading"
-		dlMu.Unlock()
-
-		res, err := downloadFileWithProgress(ctx, dlURL, req.DestDir, title, ext, func(written, total int64) {
-			dlMu.Lock()
-			st.Written = written
-			st.Total = total
-			dlMu.Unlock()
-		})
-
-		dlMu.Lock()
-		if err != nil {
-			if errors.Is(err, context.Canceled) || st.State == "cancelled" {
-				st.State = "cancelled"
-			} else {
-				st.State = "error"
-				st.Error = err.Error()
-			}
-			dlMu.Unlock()
-			return
-		}
-		st.FilePath = res.FilePath
-		st.Size = res.Size
-		st.Written = res.Size
-		if st.Total <= 0 {
-			st.Total = res.Size
-		}
-		st.State = "complete"
-		dlMu.Unlock()
-
-		recordHistory(req.BookID, title, ext, dlURL, res.Size, resolvedBook)
-	}()
-
-	return jsonOK(map[string]any{"downloadId": req.DownloadID})
-}
-
-func recordHistory(bookID, title, ext, dlURL string, sizeBytes int64, resolved *Book) {
-	if title == "" && resolved != nil {
-		title = resolved.Name
-	}
-	if title == "" {
-		return
-	}
-	if ext == "" && resolved != nil {
-		ext = resolved.Extension
-	}
-	pageURL := ""
-	source := ""
-	id := bookID
-	if resolved != nil {
-		pageURL = resolved.URL
-		source = resolved.Source
-		if resolved.ID != "" {
-			id = resolved.ID
-		}
-	}
-	entry := HistoryEntry{
-		ID:          id,
-		CommandID:   bookID,
-		Name:        title,
-		URL:         pageURL,
-		DownloadURL: dlURL,
-		Extension:   ext,
-		Size:        formatByteSize(sizeBytes),
-		Date:        time.Now().Format("2006-01-02"),
-		Source:      source,
-	}
-
-	mu.Lock()
-	defer mu.Unlock()
-	filtered := make([]HistoryEntry, 0, len(historyItems)+1)
-	filtered = append(filtered, entry)
-	for _, existing := range historyItems {
-		if existing.CommandID == entry.CommandID && entry.CommandID != "" {
+	// Instant in-memory feed & tag match
+	allFeeds, _ := database.ListFeeds()
+	lq := strings.ToLower(q)
+	var matchedFeeds []Feed
+	for _, f := range allFeeds {
+		if strings.Contains(strings.ToLower(f.DisplayTitle()), lq) ||
+			strings.Contains(strings.ToLower(f.URL), lq) {
+			matchedFeeds = append(matchedFeeds, f)
 			continue
 		}
-		filtered = append(filtered, existing)
-		if len(filtered) >= 100 {
-			break
+		for _, t := range f.Tags {
+			if strings.Contains(strings.ToLower(t), lq) {
+				matchedFeeds = append(matchedFeeds, f)
+				break
+			}
 		}
 	}
-	historyItems = filtered
-	if dataDir != "" {
-		_ = saveJSONLocked("history.json", historyItems)
+	if matchedFeeds == nil {
+		matchedFeeds = []Feed{}
 	}
-}
-
-func handleDownloadProgress(payload []byte) []byte {
-	var req struct {
-		DownloadID string `json:"downloadId"`
-	}
-	if err := json.Unmarshal(payload, &req); err != nil {
-		return jsonError(err)
-	}
-	dlMu.Lock()
-	st, ok := downloads[req.DownloadID]
-	if !ok {
-		dlMu.Unlock()
-		return jsonError(errors.New("download not found"))
-	}
-	copySt := *st
-	dlMu.Unlock()
 
 	return jsonOK(map[string]any{
-		"id":        copySt.ID,
-		"state":     copySt.State,
-		"written":   copySt.Written,
-		"total":     copySt.Total,
-		"file_path": copySt.FilePath,
-		"size":      copySt.Size,
-		"error":     copySt.Error,
+		"items": items,
+		"feeds": matchedFeeds,
 	})
 }
 
-func handleCancelDownload(payload []byte) []byte {
+func handleMarkRead(payload []byte) []byte {
+	database, err := getDB()
+	if err != nil {
+		return jsonError(err)
+	}
 	var req struct {
-		DownloadID string `json:"downloadId"`
+		IDs  []int64 `json:"ids"`
+		Read bool    `json:"read"`
 	}
 	if err := json.Unmarshal(payload, &req); err != nil {
 		return jsonError(err)
 	}
-	dlMu.Lock()
-	if st, ok := downloads[req.DownloadID]; ok {
-		st.State = "cancelled"
-		if st.cancel != nil {
-			st.cancel()
+	if err := database.MarkRead(req.IDs, req.Read); err != nil {
+		return jsonError(err)
+	}
+	return jsonOK(nil)
+}
+
+func handleMarkFeedRead(payload []byte) []byte {
+	database, err := getDB()
+	if err != nil {
+		return jsonError(err)
+	}
+	var req struct {
+		FeedID int64 `json:"feed_id"`
+	}
+	if len(payload) > 0 {
+		_ = json.Unmarshal(payload, &req)
+	}
+	if err := database.MarkFeedRead(req.FeedID); err != nil {
+		return jsonError(err)
+	}
+	return jsonOK(nil)
+}
+
+func handleSetArchived(payload []byte) []byte {
+	database, err := getDB()
+	if err != nil {
+		return jsonError(err)
+	}
+	var req struct {
+		ID       int64 `json:"id"`
+		Archived bool  `json:"archived"`
+	}
+	if err := json.Unmarshal(payload, &req); err != nil {
+		return jsonError(err)
+	}
+	var fullText string
+	if req.Archived {
+		if art, err := database.GetArticle(req.ID); err == nil && art.FullText == "" {
+			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+			if htmlContent, fetchErr := FetchReadableContent(ctx, httpClient, art); fetchErr == nil {
+				fullText = htmlContent
+			}
+			cancel()
 		}
 	}
-	dlMu.Unlock()
+	if err := database.SetArchived(req.ID, req.Archived, fullText); err != nil {
+		return jsonError(err)
+	}
+	return jsonOK(nil)
+}
+
+func handleRecordOpen(payload []byte) []byte {
+	database, err := getDB()
+	if err != nil {
+		return jsonError(err)
+	}
+	var req struct {
+		ID  int64  `json:"id"`
+		Via string `json:"via"`
+	}
+	if err := json.Unmarshal(payload, &req); err != nil {
+		return jsonError(err)
+	}
+	if err := database.RecordOpen(req.ID, req.Via); err != nil {
+		return jsonError(err)
+	}
 	return jsonOK(nil)
 }
 
 func handleHistory(payload []byte) []byte {
+	database, err := getDB()
+	if err != nil {
+		return jsonError(err)
+	}
 	var req struct {
-		Page int `json:"page"`
+		Query  string `json:"query"`
+		Offset int    `json:"offset"`
+		Limit  int    `json:"limit"`
 	}
-	_ = json.Unmarshal(payload, &req)
-	if req.Page <= 0 {
-		req.Page = 1
+	if len(payload) > 0 {
+		_ = json.Unmarshal(payload, &req)
 	}
-
-	mu.Lock()
-	all := make([]HistoryEntry, len(historyItems))
-	copy(all, historyItems)
-	mu.Unlock()
-
-	const pageSize = 25
-	totalPages := (len(all) + pageSize - 1) / pageSize
-	if totalPages <= 0 {
-		totalPages = 1
+	entries, err := database.ListHistory(req.Query, req.Offset, req.Limit)
+	if err != nil {
+		return jsonError(err)
 	}
-	start := (req.Page - 1) * pageSize
-	if start >= len(all) {
-		return jsonOK(map[string]any{
-			"items":       []HistoryEntry{},
-			"page":        req.Page,
-			"total_pages": totalPages,
-		})
+	if entries == nil {
+		entries = []HistoryRecord{}
 	}
-	end := start + pageSize
-	if end > len(all) {
-		end = len(all)
-	}
-
-	return jsonOK(map[string]any{
-		"items":       all[start:end],
-		"page":        req.Page,
-		"total_pages": totalPages,
-	})
+	return jsonOK(map[string]any{"entries": entries})
 }
 
-func handleSaveKindle(payload []byte) []byte {
+func handleRemoveHistory(payload []byte) []byte {
+	database, err := getDB()
+	if err != nil {
+		return jsonError(err)
+	}
 	var req struct {
-		To           string `json:"to"`
-		From         string `json:"from"`
-		SMTPHost     string `json:"smtpHost"`
-		SMTPPort     int    `json:"smtpPort"`
-		SMTPPassword string `json:"smtpPassword"`
+		HistoryID int64 `json:"history_id"`
 	}
 	if err := json.Unmarshal(payload, &req); err != nil {
 		return jsonError(err)
 	}
-	if req.SMTPPort <= 0 {
+	if err := database.RemoveHistoryEntry(req.HistoryID); err != nil {
+		return jsonError(err)
+	}
+	return jsonOK(nil)
+}
+
+func handleClearHistory() []byte {
+	database, err := getDB()
+	if err != nil {
+		return jsonError(err)
+	}
+	if err := database.ClearHistory(); err != nil {
+		return jsonError(err)
+	}
+	return jsonOK(nil)
+}
+
+func handleImportURLs(payload []byte) []byte {
+	database, err := getDB()
+	if err != nil {
+		return jsonError(err)
+	}
+	var req struct {
+		Content string `json:"content"`
+	}
+	if err := json.Unmarshal(payload, &req); err != nil {
+		return jsonError(err)
+	}
+	res := ParseNewsboatURLs(req.Content)
+	imported := 0
+	for _, entry := range res.Entries {
+		if _, err := database.UpsertFeed(entry.URL, entry.CustomTitle, "", entry.CustomTitle, entry.Tags); err == nil {
+			imported++
+		}
+	}
+	return jsonOK(map[string]any{
+		"imported": imported,
+		"skipped":  res.Skipped,
+	})
+}
+
+func handleExportURLs() []byte {
+	database, err := getDB()
+	if err != nil {
+		return jsonError(err)
+	}
+	feeds, err := database.ListFeeds()
+	if err != nil {
+		return jsonError(err)
+	}
+	return jsonOK(map[string]any{
+		"content": ExportNewsboatURLs(feeds),
+	})
+}
+
+func handleImportOPML(payload []byte) []byte {
+	database, err := getDB()
+	if err != nil {
+		return jsonError(err)
+	}
+	var req struct {
+		Content string `json:"content"`
+	}
+	if err := json.Unmarshal(payload, &req); err != nil {
+		return jsonError(err)
+	}
+	entries, err := ParseOPML([]byte(req.Content))
+	if err != nil {
+		return jsonError(err)
+	}
+	imported := 0
+	for _, entry := range entries {
+		if _, err := database.UpsertFeed(entry.URL, entry.CustomTitle, "", entry.CustomTitle, entry.Tags); err == nil {
+			imported++
+		}
+	}
+	return jsonOK(map[string]any{
+		"imported": imported,
+	})
+}
+
+func handleExportOPML() []byte {
+	database, err := getDB()
+	if err != nil {
+		return jsonError(err)
+	}
+	feeds, err := database.ListFeeds()
+	if err != nil {
+		return jsonError(err)
+	}
+	xmlStr, err := ExportOPML(feeds)
+	if err != nil {
+		return jsonError(err)
+	}
+	return jsonOK(map[string]any{
+		"content": xmlStr,
+	})
+}
+
+func handleSaveDelivery(payload []byte) []byte {
+	var req struct {
+		To       string `json:"to"`
+		From     string `json:"from"`
+		SMTPHost string `json:"smtp_host"`
+		SMTPPort int    `json:"smtp_port"`
+		Password string `json:"password"`
+	}
+	if err := json.Unmarshal(payload, &req); err != nil {
+		return jsonError(err)
+	}
+	if req.SMTPHost == "" {
+		req.SMTPHost = "smtp.gmail.com"
+	}
+	if req.SMTPPort == 0 {
 		req.SMTPPort = 587
 	}
-	cfg := KindleConfig{
+	cfg := EmailDeliveryConfig{
 		To:       strings.TrimSpace(req.To),
 		From:     strings.TrimSpace(req.From),
 		SMTPHost: strings.TrimSpace(req.SMTPHost),
@@ -599,46 +900,47 @@ func handleSaveKindle(payload []byte) []byte {
 		return jsonError(err)
 	}
 
-	mu.Lock()
-	defer mu.Unlock()
-	pass := strings.TrimSpace(req.SMTPPassword)
-	if pass == "" {
-		pass = kindleCfg.SMTPPassword
+	stateMu.Lock()
+	defer stateMu.Unlock()
+	pass := delivery.SMTPPassword
+	if strings.TrimSpace(req.Password) != "" {
+		pass = req.Password
 	}
-	if pass == "" {
+	if strings.TrimSpace(pass) == "" {
 		return jsonError(errors.New("SMTP password is required"))
 	}
-	kindleCfg = kindleSecretData{
-		KindleConfig: cfg,
-		SMTPPassword: pass,
+	delivery = deliverySecretData{
+		EmailDeliveryConfig: cfg,
+		SMTPPassword:        pass,
 	}
 	if dataDir != "" {
-		if err := saveJSONLocked("kindle.json", kindleCfg); err != nil {
+		if err := saveJSONLocked("delivery.json", delivery); err != nil {
 			return jsonError(err)
 		}
 	}
 	return statusPayloadLocked()
 }
 
-func handleSendToKindle(payload []byte) []byte {
+func handleSendDelivery(payload []byte) []byte {
 	var req struct {
 		FilePath string `json:"filePath"`
 	}
 	if err := json.Unmarshal(payload, &req); err != nil {
 		return jsonError(err)
 	}
+	stateMu.Lock()
+	cfg := delivery.EmailDeliveryConfig
+	pass := delivery.SMTPPassword
+	stateMu.Unlock()
 
-	mu.Lock()
-	cfg := kindleCfg.KindleConfig
-	pass := kindleCfg.SMTPPassword
-	mu.Unlock()
-
-	if err := sendToKindle(strings.TrimSpace(req.FilePath), cfg, pass); err != nil {
+	if err := sendViaEmail(req.FilePath, cfg, pass); err != nil {
 		return jsonError(err)
 	}
-	return jsonOK(map[string]any{
-		"to": cfg.To,
-	})
+	return jsonOK(map[string]any{"sent_to": cfg.To})
+}
+
+func setHTTPClientForTest(c *http.Client) {
+	httpClient = c
 }
 
 func main() {}

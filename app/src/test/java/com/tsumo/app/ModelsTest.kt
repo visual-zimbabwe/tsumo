@@ -1,47 +1,35 @@
 package com.tsumo.app
 
-import com.tsumo.app.data.BookItem
-import com.tsumo.app.data.HistoryItem
+import com.tsumo.app.data.Feed
+import com.tsumo.app.data.OpenMode
+import com.tsumo.app.data.ReadChannel
 import org.junit.Assert.assertEquals
 import org.junit.Test
 
 class ModelsTest {
     @Test
-    fun bookItemFormattingMatchesEditorialSpec() {
-        val book = BookItem(
-            id = "2680",
-            commandId = "gutenberg:2680",
-            source = "gutenberg",
-            name = "Meditations",
-            authors = listOf("Marcus Aurelius"),
-            year = "180",
-            extension = "epub",
-            size = "0.5 MB",
+    fun feedDisplayTitlePrefersCustomTitle() {
+        val f = Feed(
+            id = 1L,
+            url = "https://aeon.co/feed.rss",
+            title = "Aeon Magazine",
+            customTitle = "Aeon",
         )
-        assertEquals("gutenberg:2680", book.effectiveId)
-        assertEquals("Marcus Aurelius", book.authorsDisplay)
-        assertEquals("180", book.yearDisplay)
-        assertEquals("EPUB · 0.5 MB", book.packageDisplay)
-
-        val zeroYearBook = book.copy(year = "0", extension = "", size = "")
-        assertEquals("—", zeroYearBook.yearDisplay)
-        assertEquals("—", zeroYearBook.packageDisplay)
+        assertEquals("Aeon", f.displayTitle)
     }
 
     @Test
-    fun historyItemConvertsToBookItem() {
-        val hist = HistoryItem(
-            id = "gutenberg:2680",
-            commandId = "gutenberg:2680",
-            source = "gutenberg",
-            name = "Meditations",
-            extension = "epub",
-            size = "0.5 MB",
-            date = "2026-11-14",
-        )
-        val book = hist.toBookItem()
-        assertEquals("gutenberg:2680", book.effectiveId)
-        assertEquals("gutenberg", book.source)
-        assertEquals("EPUB · 0.5 MB", book.packageDisplay)
+    fun openModeRoundTripsWireValue() {
+        assertEquals(OpenMode.CUSTOM_TAB, OpenMode.fromWire("custom_tab"))
+        assertEquals(OpenMode.BROWSER, OpenMode.fromWire("browser"))
+        assertEquals(OpenMode.READER, OpenMode.fromWire("unknown"))
+    }
+
+    @Test
+    fun readChannelKeysAreDistinct() {
+        val f = Feed(id = 7L, url = "https://example.com/rss", title = "Example")
+        assertEquals("all", ReadChannel.All.key)
+        assertEquals("tag:History", ReadChannel.Tag("History").key)
+        assertEquals("feed:7", ReadChannel.FeedChannel(f).key)
     }
 }
