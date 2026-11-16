@@ -1,111 +1,124 @@
 package com.tsumo.app.data
 
-data class BookItem(
-    val id: String,
-    val commandId: String,
-    val hash: String = "",
-    val isbn: String = "",
-    val url: String = "",
-    val cover: String = "",
-    val name: String,
-    val authors: List<String> = emptyList(),
-    val publisher: String = "",
-    val year: String = "",
-    val language: String = "",
-    val extension: String = "",
-    val size: String = "",
-    val rating: String = "",
-    val quality: String = "",
-    val description: String = "",
-    val categories: String = "",
-    val edition: String = "",
-    val downloadUrl: String = "",
-    val source: String = "",
+data class Feed(
+    val id: Long,
+    val url: String,
+    val title: String,
+    val siteUrl: String = "",
+    val tags: List<String> = emptyList(),
+    val customTitle: String = "",
+    val lastFetch: Long = 0L,
+    val error: String = "",
+    val position: Int = 0,
+    val unreadCount: Int = 0,
 ) {
-    val effectiveId: String
-        get() = commandId.ifBlank { id }
-
-    val authorsDisplay: String
-        get() = authors.filter { it.isNotBlank() }.joinToString(", ")
-
-    val yearDisplay: String
-        get() = year.takeIf { it.isNotBlank() && it != "0" } ?: "—"
-
-    val extDisplay: String
-        get() = extension.trim().uppercase()
-
-    val packageDisplay: String
-        get() = listOf(extDisplay, size.trim()).filter { it.isNotBlank() }.joinToString(" · ").ifBlank { "—" }
+    val displayTitle: String
+        get() = customTitle.trim().ifBlank { title.trim() }.ifBlank { url }
 }
 
-data class HistoryItem(
-    val id: String = "",
-    val commandId: String = "",
-    val name: String,
-    val url: String = "",
-    val downloadUrl: String = "",
-    val extension: String = "",
-    val size: String = "",
-    val date: String = "",
-    val source: String = "",
-) {
-    fun toBookItem(): BookItem = BookItem(
-        id = id,
-        commandId = commandId,
-        url = url,
-        name = name,
-        extension = extension,
-        size = size,
-        downloadUrl = downloadUrl,
-        source = source,
-    )
-}
-
-data class SourceCheck(
-    val domain: String,
-    val name: String,
-    val status: String,
-    val httpStatus: Int = 0,
-    val detail: String = "",
-    val ok: Boolean = false,
+data class DiscoveredFeed(
+    val url: String,
+    val title: String,
+    val siteUrl: String = "",
+    val count: Int = 0,
 )
 
+data class Article(
+    val id: Long,
+    val feedId: Long,
+    val feedTitle: String,
+    val guid: String = "",
+    val url: String = "",
+    val title: String,
+    val author: String = "",
+    val summary: String = "",
+    val content: String = "",
+    val fullText: String = "",
+    val snippet: String = "",
+    val published: Long = 0L,
+    val unread: Boolean = true,
+    val archived: Boolean = false,
+)
+
+data class HistoryEntry(
+    val historyId: Long,
+    val openedAt: Long,
+    val via: String, // reader | custom_tab | browser
+    val article: Article,
+)
+
+enum class OpenMode(val wireValue: String, val label: String) {
+    READER("reader", "In-App Reader"),
+    CUSTOM_TAB("custom_tab", "In-App Browser"),
+    BROWSER("browser", "Phone Browser");
+
+    companion object {
+        fun fromWire(value: String): OpenMode =
+            entries.firstOrNull { it.wireValue == value } ?: READER
+    }
+}
+
 data class EngineStatus(
-    val enableGutenberg: Boolean = true,
-    val enableInternetArchive: Boolean = true,
-    val kindleReady: Boolean = false,
-    val kindleTo: String = "",
-    val kindleFrom: String = "",
-    val kindleSmtpHost: String = "smtp.gmail.com",
-    val kindleSmtpPort: Int = 587,
+    val openMode: OpenMode = OpenMode.READER,
+    val keepReadDays: Int = 30,
+    val feedCount: Int = 0,
+    val unreadCount: Int = 0,
+    val archivedCount: Int = 0,
+    val deliveryReady: Boolean = false,
+    val deliveryTo: String = "",
+    val deliveryFrom: String = "",
+    val deliverySmtpHost: String = "smtp.gmail.com",
+    val deliverySmtpPort: Int = 587,
     val hasSmtpPassword: Boolean = false,
 )
 
-data class DownloadProgress(
-    val id: String,
-    val state: String, // fetching, downloading, complete, error, cancelled
-    val written: Long = 0L,
-    val total: Long = 0L,
-    val filePath: String = "",
-    val size: Long = 0L,
-    val error: String = "",
+data class RefreshSummary(
+    val refreshed: Int = 0,
+    val newItems: Int = 0,
+    val errorCount: Int = 0,
+    val firstError: String = "",
 )
 
-data class LocalShelfBook(
+data class LocalExportItem(
     val key: String,
     val title: String,
-    val authors: String,
-    val year: String,
-    val extension: String,
+    val source: String,
+    val dateLabel: String,
+    val extension: String, // MD, PDF, EPUB
     val sizeLabel: String,
-    val cover: String,
     val filePath: String,
     val publicUriString: String = "",
-    val downloadedAt: Long,
+    val savedAt: Long,
 )
 
 enum class TsumoTab(val label: String) {
-    DISCOVER("DISCOVER"),
-    CATALOG("CATALOG"),
-    SHELVES("SHELVES"),
+    READ("READ"),
+    FEEDS("FEEDS"),
+    LIBRARY("LIBRARY"),
+}
+
+sealed class ReadChannel {
+    data object All : ReadChannel()
+    data object Unread : ReadChannel()
+    data object Archived : ReadChannel()
+    data class Tag(val tag: String) : ReadChannel()
+    data class FeedChannel(val feed: Feed) : ReadChannel()
+
+    val key: String
+        get() = when (this) {
+            All -> "all"
+            Unread -> "unread"
+            Archived -> "archived"
+            is Tag -> "tag:$tag"
+            is FeedChannel -> "feed:${feed.id}"
+        }
+
+    val label: String
+        get() = when (this) {
+            All -> "All"
+            Unread -> "Unread"
+            Archived -> "Saved ★"
+            is Tag -> "#$tag"
+            is FeedChannel -> feed.displayTitle
+        }
 }

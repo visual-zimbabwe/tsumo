@@ -1,11 +1,13 @@
 package com.tsumo.app
 
+import android.content.Intent
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.SystemBarStyle
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.viewModels
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -17,20 +19,24 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.unit.dp
-import androidx.lifecycle.viewmodel.compose.viewModel
 import com.tsumo.app.data.TsumoTab
 import com.tsumo.app.ui.components.CanvasToast
 import com.tsumo.app.ui.components.TsumoBottomBar
 import com.tsumo.app.ui.components.TsumoTopBar
-import com.tsumo.app.ui.screens.AccountSheetOverlay
-import com.tsumo.app.ui.screens.BookDrawerOverlay
-import com.tsumo.app.ui.screens.CatalogScreen
-import com.tsumo.app.ui.screens.DiscoverScreen
-import com.tsumo.app.ui.screens.ShelvesScreen
+import com.tsumo.app.ui.screens.AddFeedSheetOverlay
+import com.tsumo.app.ui.screens.ArticleDrawerOverlay
+import com.tsumo.app.ui.screens.FeedsScreen
+import com.tsumo.app.ui.screens.LibraryScreen
+import com.tsumo.app.ui.screens.ReadScreen
+import com.tsumo.app.ui.screens.ReaderViewOverlay
+import com.tsumo.app.ui.screens.SearchOverlay
+import com.tsumo.app.ui.screens.SettingsSheetOverlay
 import com.tsumo.app.ui.theme.TsumoColors
 import com.tsumo.app.ui.theme.TsumoTheme
 
 class MainActivity : ComponentActivity() {
+    private val vm: TsumoViewModel by viewModels()
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
@@ -40,15 +46,25 @@ class MainActivity : ComponentActivity() {
             navigationBarStyle = SystemBarStyle.light(surfaceArgb, surfaceArgb),
         )
 
+        vm.handleIncomingShareIntent(intent)
+
         setContent {
             TsumoTheme {
-                val vm: TsumoViewModel = viewModel()
                 val state by vm.uiState.collectAsState()
 
-                BackHandler(enabled = state.selectedBook != null || state.accountOpen) {
+                BackHandler(
+                    enabled = state.readerOpen ||
+                        state.selectedArticle != null ||
+                        state.addFeedOpen ||
+                        state.settingsOpen ||
+                        state.searchActive
+                ) {
                     when {
-                        state.accountOpen -> vm.closeAccountSheet()
-                        state.selectedBook != null -> vm.closeBookDrawer()
+                        state.readerOpen -> vm.closeReader()
+                        state.settingsOpen -> vm.closeSettingsSheet()
+                        state.addFeedOpen -> vm.closeAddFeedSheet()
+                        state.selectedArticle != null -> vm.closeArticleDrawer()
+                        state.searchActive -> vm.setSearchActive(false)
                     }
                 }
 
@@ -60,40 +76,53 @@ class MainActivity : ComponentActivity() {
                     Column(modifier = Modifier.fillMaxSize()) {
                         TsumoTopBar(
                             currentTab = state.currentTab,
-                            sourcesActive = state.status.enableGutenberg || state.status.enableInternetArchive,
-                            onAccountClick = vm::openAccountSheet,
+                            unreadCount = state.totalUnread,
+                            onSearchClick = { vm.setSearchActive(true) },
+                            onAddFeedClick = { vm.openAddFeedSheet() },
+                            onSettingsClick = vm::openSettingsSheet,
                         )
 
                         Box(modifier = Modifier.weight(1f)) {
                             when (state.currentTab) {
-                                TsumoTab.DISCOVER -> DiscoverScreen(
+                                TsumoTab.READ -> ReadScreen(
                                     state = state,
-                                    onQueryChange = vm::setSearchQuery,
-                                    onSearch = vm::searchBooks,
-                                    onSelectExt = vm::selectExtFilter,
-                                    onUpdateAdvancedFilters = vm::updateAdvancedFilters,
-                                    onSelectBook = vm::openBookDrawer,
+                                    onSelectChannel = vm::selectChannel,
+                                    onStepChannel = vm::stepChannel,
+                                    onRefresh = { vm.refreshFeeds(silent = false) },
+                                    onMarkAllRead = vm::markCurrentChannelRead,
+                                    onOpenSearch = { vm.setSearchActive(true) },
+                                    onArticleTap = vm::onArticleTapped,
+                                    onArticleBrowser = vm::openInCustomTab,
+                                    onToggleArchive = vm::toggleArchive,
+                                    onToggleRead = vm::toggleRead,
+                                    onShareArticle = vm::shareArticle,
                                 )
 
-                                TsumoTab.CATALOG -> CatalogScreen(
+                                TsumoTab.FEEDS -> FeedsScreen(
                                     state = state,
-                                    onSelectSection = vm::setCatalogSection,
-                                    onLoadHistory = vm::loadHistory,
-                                    onFullTextQueryChange = vm::setFullTextQuery,
-                                    onTogglePhrase = vm::toggleFullTextPhrase,
-                                    onSearchFullText = vm::searchFullText,
-                                    onSelectBook = vm::openBookDrawer,
+                                    onFilterChange = vm::setFeedsFilterQuery,
+                                    onOpenFeed = vm::openFeedInRead,
+                                    onOpenAddFeed = { vm.openAddFeedSheet() },
+                                    onRemoveFeed = vm::removeFeedWithUndo,
+                                    onUndoRemove = vm::undoRemoveFeed,
+                                    onImportContent = vm::importFeedsContent,
+                                    onExportFeeds = vm::exportFeeds,
                                 )
 
-                                TsumoTab.SHELVES -> ShelvesScreen(
+                                TsumoTab.LIBRARY -> LibraryScreen(
                                     state = state,
-                                    onSelectSection = vm::setShelvesSection,
-                                    onOpenLocalBook = vm::openLocalBook,
-                                    onShareLocalBook = vm::shareLocalBook,
-                                    onSendToKindle = { entry -> vm.sendFileToKindle(entry.filePath, entry.key) },
-                                    onRemoveLocalBook = vm::removeLocalBook,
-                                    onSelectBookmark = vm::openBookDrawer,
-                                    onRemoveBookmark = vm::toggleBookmark,
+                                    onSelectSection = vm::setLibrarySection,
+                                    onArticleTap = vm::onArticleTapped,
+                                    onArticleBrowser = vm::openInCustomTab,
+                                    onToggleArchive = vm::toggleArchive,
+                                    onShareArticle = vm::shareArticle,
+                                    onHistoryQueryChange = vm::setHistoryQuery,
+                                    onRemoveHistoryEntry = vm::removeHistoryEntry,
+                                    onClearHistory = vm::clearHistory,
+                                    onOpenLocalExport = vm::openLocalExport,
+                                    onShareLocalExport = vm::shareLocalExport,
+                                    onSendExportViaEmail = vm::sendExportViaEmail,
+                                    onRemoveLocalExport = vm::removeLocalExport,
                                 )
                             }
                         }
@@ -104,31 +133,72 @@ class MainActivity : ComponentActivity() {
                         )
                     }
 
-                    BookDrawerOverlay(
+                    SearchOverlay(
                         state = state,
-                        onDismiss = vm::closeBookDrawer,
-                        onDownload = vm::downloadSelectedBook,
-                        onCancelDownload = vm::cancelActiveDownload,
-                        onOpenLocal = vm::openLocalBook,
-                        onToggleBookmark = vm::toggleBookmark,
+                        onDismiss = { vm.setSearchActive(false) },
+                        onQueryChange = vm::setSearchQuery,
+                        onScopeChange = vm::setSearchScope,
+                        onOpenFeed = vm::openFeedInRead,
+                        onArticleTap = vm::onArticleTapped,
+                        onArticleBrowser = vm::openInCustomTab,
+                        onToggleArchive = vm::toggleArchive,
+                        onShareArticle = vm::shareArticle,
                     )
 
-                    AccountSheetOverlay(
+                    ArticleDrawerOverlay(
                         state = state,
-                        onDismiss = vm::closeAccountSheet,
-                        onUpdateSources = vm::updateSources,
-                        onRunDoctor = vm::runDoctor,
-                        onSaveKindle = vm::saveKindleConfig,
+                        onDismiss = vm::closeArticleDrawer,
+                        onOpenReader = vm::openInReader,
+                        onOpenCustomTab = vm::openInCustomTab,
+                        onOpenExternalBrowser = vm::openInExternalBrowser,
+                        onShare = vm::shareArticle,
+                        onToggleArchive = vm::toggleArchive,
+                        onToggleRead = vm::toggleRead,
+                        onExportMarkdown = vm::exportMarkdown,
+                        onExportPdf = vm::exportPdf,
+                    )
+
+                    ReaderViewOverlay(
+                        state = state,
+                        onClose = vm.let { { it.closeReader() } },
+                        onOpenCustomTab = vm::openInCustomTab,
+                        onShare = vm::shareArticle,
+                        onToggleArchive = vm::toggleArchive,
+                        onExportMarkdown = vm::exportMarkdown,
+                        onExportPdf = vm::exportPdf,
+                        onAdjustTextScale = vm::adjustReaderTextScale,
+                    )
+
+                    AddFeedSheetOverlay(
+                        state = state,
+                        onDismiss = vm::closeAddFeedSheet,
+                        onUrlChange = vm::setAddFeedUrl,
+                        onTagsChange = vm::setAddFeedTags,
+                        onCustomTitleChange = vm::setAddFeedCustomTitle,
+                        onDiscover = vm::discoverFeed,
+                        onConfirmAdd = vm::confirmAddFeed,
+                    )
+
+                    SettingsSheetOverlay(
+                        state = state,
+                        onDismiss = vm::closeSettingsSheet,
+                        onUpdateReaderSettings = vm::updateReaderSettings,
+                        onSaveDelivery = vm::saveDeliveryConfig,
                     )
 
                     CanvasToast(
                         message = state.toastMessage,
                         modifier = Modifier
                             .align(Alignment.BottomCenter)
-                            .padding(bottom = 86.dp),
+                            .padding(bottom = 82.dp),
                     )
                 }
             }
         }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        vm.handleIncomingShareIntent(intent)
     }
 }

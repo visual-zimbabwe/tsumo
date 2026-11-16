@@ -13,16 +13,17 @@ import (
 	"strings"
 )
 
-type KindleConfig struct {
+// EmailDeliveryConfig holds optional SMTP settings for delivering exported articles.
+type EmailDeliveryConfig struct {
 	To       string `json:"to"`
 	From     string `json:"from"`
 	SMTPHost string `json:"smtp_host"`
 	SMTPPort int    `json:"smtp_port"`
 }
 
-func (c KindleConfig) Validate() error {
+func (c EmailDeliveryConfig) Validate() error {
 	if strings.TrimSpace(c.To) == "" || !strings.Contains(c.To, "@") {
-		return errors.New("valid Send-to-Kindle email is required")
+		return errors.New("valid recipient email is required")
 	}
 	if strings.TrimSpace(c.From) == "" || !strings.Contains(c.From, "@") {
 		return errors.New("valid sender email is required")
@@ -36,7 +37,7 @@ func (c KindleConfig) Validate() error {
 	return nil
 }
 
-func sendToKindle(filePath string, cfg KindleConfig, password string) error {
+func sendViaEmail(filePath string, cfg EmailDeliveryConfig, password string) error {
 	if err := cfg.Validate(); err != nil {
 		return err
 	}
@@ -48,22 +49,22 @@ func sendToKindle(filePath string, cfg KindleConfig, password string) error {
 	}
 	data, err := os.ReadFile(filePath)
 	if err != nil {
-		return fmt.Errorf("read book file: %w", err)
+		return fmt.Errorf("read exported file: %w", err)
 	}
 
 	filename := filepath.Base(filePath)
-	boundary := "TSUMO_KINDLE_MIME_BOUNDARY"
+	boundary := "TSUMO_DELIVERY_MIME_BOUNDARY"
 
 	var msg bytes.Buffer
 	msg.WriteString(fmt.Sprintf("From: %s\r\n", cfg.From))
 	msg.WriteString(fmt.Sprintf("To: %s\r\n", cfg.To))
-	msg.WriteString(fmt.Sprintf("Subject: Send to Kindle: %s\r\n", filename))
+	msg.WriteString(fmt.Sprintf("Subject: Tsumo Article: %s\r\n", filename))
 	msg.WriteString("MIME-Version: 1.0\r\n")
 	msg.WriteString(fmt.Sprintf("Content-Type: multipart/mixed; boundary=%q\r\n\r\n", boundary))
 
 	msg.WriteString(fmt.Sprintf("--%s\r\n", boundary))
 	msg.WriteString("Content-Type: text/plain; charset=utf-8\r\n\r\n")
-	msg.WriteString("Delivered by Tsumo.\r\n\r\n")
+	msg.WriteString("Delivered from Tsumo local library.\r\n\r\n")
 
 	msg.WriteString(fmt.Sprintf("--%s\r\n", boundary))
 	msg.WriteString("Content-Type: application/octet-stream\r\n")

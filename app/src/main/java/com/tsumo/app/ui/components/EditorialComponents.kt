@@ -30,7 +30,10 @@ import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.Add
 import androidx.compose.material.icons.outlined.Person
+import androidx.compose.material.icons.outlined.Search
+import androidx.compose.material.icons.outlined.Star
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -46,8 +49,6 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.SolidColor
-import androidx.compose.ui.layout.ContentScale
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
@@ -59,10 +60,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import coil.compose.AsyncImagePainter
-import coil.compose.SubcomposeAsyncImage
-import coil.compose.SubcomposeAsyncImageContent
-import coil.request.ImageRequest
+import com.tsumo.app.data.Article
 import com.tsumo.app.data.TsumoTab
 import com.tsumo.app.ui.theme.AlexBrushFamily
 import com.tsumo.app.ui.theme.EBGaramondFamily
@@ -72,17 +70,19 @@ import com.tsumo.app.ui.theme.TsumoColors
 @Composable
 fun TsumoTopBar(
     currentTab: TsumoTab,
-    sourcesActive: Boolean,
-    onAccountClick: () -> Unit,
+    unreadCount: Int,
+    onSearchClick: () -> Unit,
+    onAddFeedClick: () -> Unit,
+    onSettingsClick: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     Row(
         modifier = modifier
             .fillMaxWidth()
-            .background(TsumoColors.Surface.copy(alpha = 0.94f))
+            .background(TsumoColors.Surface.copy(alpha = 0.96f))
             .statusBarsPadding()
-            .height(64.dp)
-            .padding(horizontal = 24.dp),
+            .height(60.dp)
+            .padding(horizontal = 20.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.SpaceBetween,
     ) {
@@ -101,35 +101,68 @@ fun TsumoTopBar(
                 text = currentTab.label,
                 style = MaterialTheme.typography.labelSmall.copy(
                     letterSpacing = 1.6.sp,
-                    color = TsumoColors.Secondary.copy(alpha = 0.62f),
+                    color = TsumoColors.Secondary.copy(alpha = 0.68f),
                 ),
                 modifier = Modifier.padding(bottom = 5.dp),
             )
+            if (unreadCount > 0) {
+                Text(
+                    text = "· $unreadCount",
+                    style = MaterialTheme.typography.labelSmall.copy(
+                        letterSpacing = 0.8.sp,
+                        color = TsumoColors.Outline,
+                    ),
+                    modifier = Modifier.padding(bottom = 5.dp),
+                )
+            }
         }
 
-        Box(
-            modifier = Modifier
-                .size(32.dp)
-                .clip(CircleShape)
-                .background(TsumoColors.Primary)
-                .clickable(onClick = onAccountClick),
-            contentAlignment = Alignment.Center,
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
         ) {
-            Icon(
-                imageVector = Icons.Outlined.Person,
-                contentDescription = "Account",
-                tint = TsumoColors.OnPrimary,
-                modifier = Modifier.size(18.dp),
-            )
-            if (!sourcesActive) {
-                Canvas(
-                    modifier = Modifier
-                        .align(Alignment.TopEnd)
-                        .padding(5.dp)
-                        .size(5.dp)
-                ) {
-                    drawCircle(color = TsumoColors.ErrorContainer)
-                }
+            Box(
+                modifier = Modifier
+                    .size(34.dp)
+                    .clickable(onClick = onSearchClick),
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(
+                    imageVector = Icons.Outlined.Search,
+                    contentDescription = "Search feeds and articles",
+                    tint = TsumoColors.Primary,
+                    modifier = Modifier.size(20.dp),
+                )
+            }
+
+            Box(
+                modifier = Modifier
+                    .size(34.dp)
+                    .clickable(onClick = onAddFeedClick),
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(
+                    imageVector = Icons.Outlined.Add,
+                    contentDescription = "Add feed",
+                    tint = TsumoColors.Primary,
+                    modifier = Modifier.size(21.dp),
+                )
+            }
+
+            Box(
+                modifier = Modifier
+                    .size(32.dp)
+                    .clip(CircleShape)
+                    .background(TsumoColors.Primary)
+                    .clickable(onClick = onSettingsClick),
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(
+                    imageVector = Icons.Outlined.Person,
+                    contentDescription = "Settings",
+                    tint = TsumoColors.OnPrimary,
+                    modifier = Modifier.size(17.dp),
+                )
             }
         }
     }
@@ -222,103 +255,131 @@ fun FilterTabItem(
 }
 
 @Composable
-fun ArchivalCoverPlate(
-    coverUrl: String,
-    title: String,
-    authors: String,
-    extension: String,
+fun ArticleListRow(
+    article: Article,
+    onClick: () -> Unit,
+    onOpenBrowser: () -> Unit,
+    onToggleArchive: () -> Unit,
+    onShare: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    Box(
+    Column(
         modifier = modifier
             .fillMaxWidth()
-            .aspectRatio(2f / 3f)
-            .background(TsumoColors.SurfaceContainerLow),
+            .clickable(onClick = onClick)
+            .padding(horizontal = 20.dp, vertical = 14.dp),
     ) {
-        if (coverUrl.isNotBlank()) {
-            SubcomposeAsyncImage(
-                model = ImageRequest.Builder(LocalContext.current)
-                    .data(coverUrl)
-                    .crossfade(true)
-                    .build(),
-                contentDescription = title,
-                contentScale = ContentScale.Crop,
-                modifier = Modifier.fillMaxSize(),
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween,
+        ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(7.dp),
+                modifier = Modifier.weight(1f),
             ) {
-                when (painter.state) {
-                    is AsyncImagePainter.State.Success -> SubcomposeAsyncImageContent()
-                    else -> TypographicFallbackPlate(
-                        title = title,
-                        authors = authors,
-                        extension = extension,
+                if (article.unread) {
+                    Canvas(modifier = Modifier.size(6.dp)) {
+                        drawCircle(color = TsumoColors.Secondary)
+                    }
+                }
+                Text(
+                    text = article.feedTitle.uppercase(),
+                    style = MaterialTheme.typography.labelSmall.copy(
+                        letterSpacing = 1.1.sp,
+                        color = if (article.unread) TsumoColors.Secondary else TsumoColors.Outline,
+                    ),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f, fill = false),
+                )
+                val timeStr = formatRelativeTime(article.published)
+                if (timeStr.isNotBlank()) {
+                    Text(
+                        text = "· $timeStr",
+                        style = MaterialTheme.typography.labelSmall.copy(
+                            letterSpacing = 0.6.sp,
+                            color = TsumoColors.Outline,
+                        ),
+                        maxLines = 1,
                     )
                 }
             }
-        } else {
-            TypographicFallbackPlate(
-                title = title,
-                authors = authors,
-                extension = extension,
+
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                Text(
+                    text = if (article.archived) "★" else "☆",
+                    fontSize = 16.sp,
+                    color = if (article.archived) TsumoColors.Secondary else TsumoColors.Outline,
+                    modifier = Modifier
+                        .clickable(onClick = onToggleArchive)
+                        .padding(horizontal = 2.dp, vertical = 2.dp),
+                )
+                if (article.url.isNotBlank()) {
+                    Text(
+                        text = "↗",
+                        fontSize = 15.sp,
+                        color = TsumoColors.Outline,
+                        modifier = Modifier
+                            .clickable(onClick = onOpenBrowser)
+                            .padding(horizontal = 2.dp, vertical = 2.dp),
+                    )
+                }
+                Text(
+                    text = "SHARE",
+                    style = MaterialTheme.typography.labelSmall.copy(
+                        fontSize = 9.5.sp,
+                        letterSpacing = 0.9.sp,
+                        color = TsumoColors.Outline,
+                    ),
+                    modifier = Modifier
+                        .clickable(onClick = onShare)
+                        .padding(vertical = 2.dp),
+                )
+            }
+        }
+
+        Spacer(modifier = Modifier.height(6.dp))
+
+        Text(
+            text = article.title,
+            style = MaterialTheme.typography.titleMedium.copy(
+                fontWeight = if (article.unread) FontWeight.SemiBold else FontWeight.Normal,
+                color = if (article.unread) TsumoColors.OnSurface else TsumoColors.OnSurfaceVariant,
+            ),
+            maxLines = 3,
+            overflow = TextOverflow.Ellipsis,
+        )
+
+        if (article.summary.isNotBlank()) {
+            Spacer(modifier = Modifier.height(4.dp))
+            Text(
+                text = article.summary,
+                style = MaterialTheme.typography.bodySmall.copy(
+                    color = TsumoColors.OnSurfaceVariant.copy(alpha = if (article.unread) 0.9f else 0.7f),
+                ),
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
             )
         }
     }
 }
 
-@Composable
-private fun TypographicFallbackPlate(
-    title: String,
-    authors: String,
-    extension: String,
-) {
-    Box(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(TsumoColors.SurfaceContainerLow)
-            .padding(10.dp)
-            .border(0.5.dp, TsumoColors.Primary.copy(alpha = 0.14f))
-            .padding(12.dp),
-    ) {
-        Column(
-            modifier = Modifier.fillMaxSize(),
-            verticalArrangement = Arrangement.SpaceBetween,
-        ) {
-            Text(
-                text = extension.ifBlank { "FOLIO" }.uppercase(),
-                style = MaterialTheme.typography.labelSmall.copy(
-                    fontSize = 9.sp,
-                    letterSpacing = 1.4.sp,
-                    color = TsumoColors.Secondary.copy(alpha = 0.7f),
-                ),
-            )
-            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                Text(
-                    text = title.ifBlank { "Untitled" },
-                    fontFamily = EBGaramondFamily,
-                    fontSize = 15.sp,
-                    lineHeight = 19.sp,
-                    color = TsumoColors.Primary,
-                    maxLines = 4,
-                    overflow = TextOverflow.Ellipsis,
-                )
-                if (authors.isNotBlank()) {
-                    Text(
-                        text = authors,
-                        style = MaterialTheme.typography.labelSmall.copy(
-                            fontSize = 10.sp,
-                            letterSpacing = 0.4.sp,
-                            color = TsumoColors.Secondary,
-                        ),
-                        maxLines = 2,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                }
-            }
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(0.5.dp)
-                    .background(TsumoColors.Primary.copy(alpha = 0.18f)),
-            )
+fun formatRelativeTime(epochSeconds: Long): String {
+    if (epochSeconds <= 0L) return ""
+    val diffSec = (System.currentTimeMillis() / 1000L) - epochSeconds
+    return when {
+        diffSec < 60L -> "now"
+        diffSec < 3600L -> "${diffSec / 60L}m"
+        diffSec < 86400L -> "${diffSec / 3600L}h"
+        diffSec < 604800L -> "${diffSec / 86400L}d"
+        else -> {
+            val fmt = java.text.SimpleDateFormat("MMM d", java.util.Locale.US)
+            fmt.format(java.util.Date(epochSeconds * 1000L))
         }
     }
 }
